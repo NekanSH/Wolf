@@ -14,13 +14,13 @@ def banner(mode):
     e=cfg.POSITION_SIZE_USDT*cfg.LEVERAGE
     print(f"""
 {C}{B}╔═══════════════════════════════════════════════════╗
-║  WOLF MATRIX v4.1 — Momentum Filter Edition         ║
-║  LONG │ δ50-80% │ BTC UP+momentum │ ρ≥75% │ 10x   ║
+║  WOLF MATRIX v5 — 5-Minute Edition                 ║
+║  LONG │ δ50-80% │ BTC UP │ trailing TP │ 10x      ║
 ╚═══════════════════════════════════════════════════╝{RST}
   {mode} │ {len(cfg.SYMBOLS)} symbols │ {cfg.KLINE_INTERVAL}min │ {Y}{cfg.LEVERAGE}x{RST} ${e:.0f}
   Entry: δ {cfg.DELTA_MIN:.0%}-{cfg.DELTA_MAX:.0%} + green + BTC▲+momentum + ρ≥{cfg.DENSITY_MIN:.0%}
-  Vol:   {cfg.VOL_MIN}-{cfg.VOL_MAX}x │ Exit: TIMEOUT {cfg.MAX_HOLD_CANDLES}min
-  Warmup: {cfg.WARMUP_CANDLES}min
+  Exit:  BTC_DOWN | trailing TP@{cfg.TRAILING_ACTIVATE}%-{cfg.TRAILING_DISTANCE}% | TIMEOUT {cfg.MAX_HOLD_CANDLES}×{cfg.KLINE_INTERVAL}min
+  Warmup: {cfg.WARMUP_CANDLES}×{cfg.KLINE_INTERVAL}min
 """)
 
 def render(eng: WolfEngine):
