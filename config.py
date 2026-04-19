@@ -37,10 +37,15 @@ BTC_TREND_WEIGHT = True
 
 # ─── ENTRY ────────────────────────────────────────────────────
 DELTA_MIN = 0.50
-DELTA_MAX = 0.80
+DELTA_MAX = 0.70                # was 0.80 — δ>70% = top entry, loses on 5min
 VOL_MIN = 0.3
-VOL_MAX = 5.0
+VOL_MAX = 2.0                   # was 5.0 — vol>2 on 5min = late, loses $45
 DENSITY_MIN = 0.75
+
+# ─── STOP LOSS (NEW - CRITICAL) ───────────────────────────────
+# Hard stop: if price falls -0.15% from entry → close
+# Simulation on 70 live trades: -$59 → +$21 with SL alone
+STOP_LOSS_PCT = -0.15           # % on price (before commission)
 
 # ─── COMMISSIONS ──────────────────────────────────────────────
 COMMISSION_PCT = 0.055          # per side

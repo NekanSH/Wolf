@@ -119,7 +119,11 @@ class WolfEngine:
             if not self.btc_up:
                 exit_reason = "BTC_DOWN"
 
-            # 2. TRAILING TP → lock profit
+            # 2. STOP LOSS → hard floor, cut losses fast
+            if not exit_reason and current_pnl <= cfg.STOP_LOSS_PCT:
+                exit_reason = "STOP_LOSS"
+
+            # 3. TRAILING TP → lock profit
             if not exit_reason and pos.max_pnl >= cfg.TRAILING_ACTIVATE:
                 # Update trailing floor
                 new_floor = pos.max_pnl - cfg.TRAILING_DISTANCE
@@ -129,7 +133,7 @@ class WolfEngine:
                 if current_pnl <= pos.trailing_floor:
                     exit_reason = "TRAILING_TP"
 
-            # 3. TIMEOUT
+            # 4. TIMEOUT
             if not exit_reason and held >= cfg.MAX_HOLD_CANDLES:
                 exit_reason = "TIMEOUT"
 
