@@ -29,8 +29,9 @@ class Position:
     status: str = "OPEN"; side: str = "LONG"
     entry_density: float = 0.0; entry_delta: float = 0.0
     entry_vol_ratio: float = 0.0; max_pnl: float = 0.0
-    trailing_floor: float = -999.0  # activated when peak hits threshold
+    trailing_floor: float = -999.0
     exit_reason: str = ""
+    btc_regime: str = "UP"
     def __post_init__(self):
         if not self.size_usdt: self.size_usdt = cfg.POSITION_SIZE_USDT
         if self.leverage == 10: self.leverage = cfg.LEVERAGE
@@ -68,10 +69,11 @@ class WolfEngine:
             with open(cfg.CSV_TRADES, "w", newline="") as f:
                 csv.writer(f).writerow(["symbol","side","entry","exit",
                     "pnl_pct","pnl_usdt","leverage","hold_candles",
-                    "density","delta","vol_ratio","max_pnl","exit_reason"])
+                    "density","delta","vol_ratio","max_pnl",
+                    "exit_reason","btc_regime"])
         if not os.path.exists(cfg.CSV_SIGNALS):
             with open(cfg.CSV_SIGNALS, "w", newline="") as f:
-                csv.writer(f).writerow(["ts","symbol","price","delta",
+                csv.writer(f).writerow(["ts","symbol","side","price","delta",
                     "density","vol_ratio","btc_trend"])
 
     async def on_candle(self, symbol, cd):
@@ -104,32 +106,36 @@ class WolfEngine:
         sym_candle = st.candle_count
 
         # ══════════════════════════════════
-        # 3 EXIT RULES (simple, no over-engineering)
+        # EXIT RULES — works for both LONG and SHORT
         # ══════════════════════════════════
         for pos in self.open:
             if pos.symbol != symbol: continue
-            current_pnl = (c.c - pos.entry_price) / pos.entry_price * 100
+            # Calculate PnL based on side
+            if pos.side == "LONG":
+                current_pnl = (c.c - pos.entry_price) / pos.entry_price * 100
+            else:  # SHORT
+                current_pnl = (pos.entry_price - c.c) / pos.entry_price * 100
             if current_pnl > pos.max_pnl:
                 pos.max_pnl = current_pnl
             held = sym_candle - pos.entry_candle
 
             exit_reason = None
 
-            # 1. BTC DOWN → real reversal, close
-            if not self.btc_up:
-                exit_reason = "BTC_DOWN"
+            # 1. BTC reversal against position
+            if pos.side == "LONG" and not self.btc_up:
+                exit_reason = "BTC_REVERSAL"
+            elif pos.side == "SHORT" and self.btc_up and self.btc_momentum:
+                exit_reason = "BTC_REVERSAL"
 
-            # 2. STOP LOSS → hard floor, cut losses fast
+            # 2. STOP LOSS
             if not exit_reason and current_pnl <= cfg.STOP_LOSS_PCT:
                 exit_reason = "STOP_LOSS"
 
-            # 3. TRAILING TP → lock profit
+            # 3. TRAILING TP
             if not exit_reason and pos.max_pnl >= cfg.TRAILING_ACTIVATE:
-                # Update trailing floor
                 new_floor = pos.max_pnl - cfg.TRAILING_DISTANCE
                 if new_floor > pos.trailing_floor:
                     pos.trailing_floor = new_floor
-                # Check if price fell below floor
                 if current_pnl <= pos.trailing_floor:
                     exit_reason = "TRAILING_TP"
 
@@ -143,12 +149,9 @@ class WolfEngine:
         self.open = [p for p in self.open if p.status == "OPEN"]
 
         # ══════════════════════════════════
-        # ENTRY
+        # ENTRY — RESEARCH MODE: LONG + SHORT
+        # BTC state tagged per trade, no hard block
         # ══════════════════════════════════
-
-        # BTC must be UP with momentum
-        if not (self.btc_up and self.btc_momentum):
-            self.blocked += 1; return
 
         if any(p.symbol == symbol for p in self.open): return
         if len(self.open) >= cfg.MAX_SIMULTANEOUS: return
@@ -160,34 +163,60 @@ class WolfEngine:
         density = st.density
         vol_r = c.v / st.avg_vol if st.avg_vol > 0 else 0
 
-        # Tightened mode
-        delta_min = 0.65 if self._tightened else cfg.DELTA_MIN
+        # Volume filter (applies to both sides)
+        if vol_r < cfg.VOL_MIN:
+            self.block_reasons["vol_low"] += 1; return
+        if vol_r >= cfg.VOL_MAX:
+            self.block_reasons["vol_high"] += 1; return
 
-        if delta < delta_min or delta >= cfg.DELTA_MAX: return
-        if not st.candle_green: return
-        if vol_r < cfg.VOL_MIN: self.block_reasons["vol_low"] += 1; return
-        if vol_r >= cfg.VOL_MAX: self.block_reasons["vol_high"] += 1; return
-        if density < cfg.DENSITY_MIN: self.block_reasons["density_low"] += 1; return
+        # Determine direction
+        side = None
+
+        # LONG conditions
+        long_ok = (cfg.ENTRY_MODE in ("ALL", "LONG_ONLY") and
+                   delta >= cfg.DELTA_LONG_MIN and
+                   delta <= cfg.DELTA_LONG_MAX and
+                   density >= cfg.DENSITY_LONG_MIN and
+                   st.candle_green)
+
+        # SHORT conditions
+        short_ok = (cfg.ENTRY_MODE in ("ALL", "SHORT_ONLY") and
+                    delta <= cfg.DELTA_SHORT_MAX and
+                    delta >= cfg.DELTA_SHORT_MIN and
+                    density <= cfg.DENSITY_SHORT_MAX and
+                    not st.candle_green)
+
+        if long_ok:
+            side = "LONG"
+        elif short_ok:
+            side = "SHORT"
+        else:
+            return
 
         # ═══ ENTER ═══
         self.signals += 1
-        self.long_count += 1
+        if side == "LONG": self.long_count += 1
+        else: self.short_count += 1
         self._last_trade_candle[symbol] = sym_candle
         self._daily_trades += 1
 
         pos = Position(symbol=symbol, entry_price=c.c, entry_candle=sym_candle,
-                       entry_density=density, entry_delta=delta, entry_vol_ratio=vol_r)
+                       entry_density=density, entry_delta=delta,
+                       entry_vol_ratio=vol_r, side=side)
+        # Tag with market regime
+        pos.btc_regime = self.btc_trend  # UP / WEAK / DOWN
         self.open.append(pos)
 
         with open(cfg.CSV_SIGNALS, "a", newline="") as f:
-            csv.writer(f).writerow([c.ts, symbol, c.c,
-                round(delta,4), round(density,4), round(vol_r,2), self.btc_trend])
+            csv.writer(f).writerow([c.ts, symbol, side, c.c,
+                round(delta,4), round(density,4), round(vol_r,2),
+                self.btc_trend])
 
         if cfg.LOG_TO_CONSOLE:
-            tight = " TIGHT" if self._tightened else ""
-            print(f"  \033[32m▶ LONG {symbol} @ {c.c:.4f}  "
+            sc = "\033[32m" if side == "LONG" else "\033[31m"
+            print(f"  {sc}▶ {side} {symbol} @ {c.c:.4f}  "
                   f"δ={delta:+.0%} ρ={density:.0%} vol={vol_r:.1f}x "
-                  f"BTC={self.btc_trend}{tight}\033[0m")
+                  f"BTC={self.btc_trend}\033[0m")
 
     async def on_trade(self, symbol, trade):
         st = self.states.get(symbol)
@@ -198,7 +227,10 @@ class WolfEngine:
 
     def _close(self, pos, price, held, reason):
         pos.exit_price = price
-        raw_pnl = (price - pos.entry_price) / pos.entry_price * 100
+        if pos.side == "LONG":
+            raw_pnl = (price - pos.entry_price) / pos.entry_price * 100
+        else:  # SHORT
+            raw_pnl = (pos.entry_price - price) / pos.entry_price * 100
         commission = cfg.COMMISSION_PCT * 2
         pos.pnl_pct = raw_pnl - commission
         pos.pnl_usdt = pos.size_usdt * pos.leverage * pos.pnl_pct / 100
@@ -207,32 +239,27 @@ class WolfEngine:
         self.total_pnl += pos.pnl_usdt
         self.closed.append(pos)
 
-        # Loss streak tracking
+        # Loss streak
         if pos.pnl_usdt <= 0:
             self._consecutive_losses += 1
-            if self._consecutive_losses >= 3 and not self._tightened:
-                self._tightened = True
-                if cfg.LOG_TO_CONSOLE:
-                    print(f"  \033[33m⚠ TIGHT ({self._consecutive_losses})\033[0m")
         else:
             self._consecutive_losses = 0
-            if self._tightened:
-                self._tightened = False
 
         with open(cfg.CSV_TRADES, "a", newline="") as f:
-            csv.writer(f).writerow([pos.symbol, "LONG",
+            csv.writer(f).writerow([pos.symbol, pos.side,
                 round(pos.entry_price,6), round(pos.exit_price,6),
                 round(pos.pnl_pct,4), round(pos.pnl_usdt,4),
                 pos.leverage, held,
                 round(pos.entry_density,4), round(pos.entry_delta,4),
-                round(pos.entry_vol_ratio,2), round(pos.max_pnl,4), reason])
+                round(pos.entry_vol_ratio,2), round(pos.max_pnl,4),
+                reason, getattr(pos, 'btc_regime', 'UP')])
 
         if cfg.LOG_TO_CONSOLE:
             c = "\033[32m" if pos.pnl_usdt >= 0 else "\033[31m"
             fee = pos.size_usdt * pos.leverage * commission / 100
-            print(f"  {c}◀ {pos.symbol} {pos.pnl_pct:+.3f}% "
+            print(f"  {c}◀ {pos.side} {pos.symbol} {pos.pnl_pct:+.3f}% "
                   f"${pos.pnl_usdt:+.2f} (fee:${fee:.2f}) "
-                  f"held={held}×5m [{reason}]\033[0m")
+                  f"held={held}×5m [{reason}] BTC={getattr(pos,'btc_regime','?')}\033[0m")
 
     def snapshot(self):
         return [{"symbol":s, "density":round(self.states[s].density,4),

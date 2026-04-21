@@ -35,17 +35,21 @@ MOMENTUM_LOOKBACK = 5; HIGH_LOW_LOOKBACK = 20; DENSITY_HISTORY = 5
 DELTA_VOLUME_MIN_MULT = 1.0
 BTC_TREND_WEIGHT = True
 
-# ─── ENTRY ────────────────────────────────────────────────────
-DELTA_MIN = 0.50
-DELTA_MAX = 0.70                # was 0.80 — δ>70% = top entry, loses on 5min
-VOL_MIN = 0.3
-VOL_MAX = 2.0                   # was 5.0 — vol>2 on 5min = late, loses $45
-DENSITY_MIN = 0.75
+# ─── ENTRY (RESEARCH MODE - широкие фильтры для сбора данных) ──
+DELTA_LONG_MIN = 0.40           # было 0.50 — собираем больше данных
+DELTA_LONG_MAX = 0.90           # было 0.70
+DELTA_SHORT_MIN = -0.90         # SHORT зеркально
+DELTA_SHORT_MAX = -0.40
+VOL_MIN = 0.2                   # было 0.3
+VOL_MAX = 8.0                   # было 2.0
+DENSITY_LONG_MIN = 0.60         # было 0.75 — мягче
+DENSITY_SHORT_MAX = 0.40        # SHORT зеркально
 
-# ─── STOP LOSS (NEW - CRITICAL) ───────────────────────────────
-# Hard stop: if price falls -0.15% from entry → close
-# Simulation on 70 live trades: -$59 → +$21 with SL alone
-STOP_LOSS_PCT = -0.15           # % on price (before commission)
+# Entry mode: ALL | LONG_ONLY | SHORT_ONLY
+ENTRY_MODE = "ALL"              # собираем данные во всех режимах
+
+# ─── STOP LOSS ────────────────────────────────────────────────
+STOP_LOSS_PCT = -0.20           # немного шире для research mode
 
 # ─── COMMISSIONS ──────────────────────────────────────────────
 COMMISSION_PCT = 0.055          # per side
@@ -54,9 +58,9 @@ COMMISSION_PCT = 0.055          # per side
 LEVERAGE = 10
 SHADOW_MODE = True
 POSITION_SIZE_USDT = 100.0
-MAX_SIMULTANEOUS = 4
-MAX_HOLD_CANDLES = 6            # 6 × 5min = 30 min
-COOLDOWN_CANDLES = 3            # 3 × 5min = 15 min
+MAX_SIMULTANEOUS = 6            # было 4 — больше одновременных для данных
+MAX_HOLD_CANDLES = 6
+COOLDOWN_CANDLES = 2            # было 3 — меньше ждём между сделками
 
 # ─── TRAILING TP (NEW) ───────────────────────────────────────
 # Если peak ≥ 0.20%: ставим floor = peak - 0.10%

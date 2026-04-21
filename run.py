@@ -14,12 +14,14 @@ def banner(mode):
     e=cfg.POSITION_SIZE_USDT*cfg.LEVERAGE
     print(f"""
 {C}{B}╔═══════════════════════════════════════════════════╗
-║  WOLF MATRIX v5 — 5-Minute Edition                 ║
-║  LONG │ δ50-80% │ BTC UP │ trailing TP │ 10x      ║
+║  WOLF MATRIX v6 — RESEARCH MODE (LONG+SHORT)       ║
+║  Collects data in ALL market regimes               ║
 ╚═══════════════════════════════════════════════════╝{RST}
   {mode} │ {len(cfg.SYMBOLS)} symbols │ {cfg.KLINE_INTERVAL}min │ {Y}{cfg.LEVERAGE}x{RST} ${e:.0f}
-  Entry: δ {cfg.DELTA_MIN:.0%}-{cfg.DELTA_MAX:.0%} + green + BTC▲+momentum + ρ≥{cfg.DENSITY_MIN:.0%}
-  Exit:  BTC_DOWN | trailing TP@{cfg.TRAILING_ACTIVATE}%-{cfg.TRAILING_DISTANCE}% | TIMEOUT {cfg.MAX_HOLD_CANDLES}×{cfg.KLINE_INTERVAL}min
+  LONG:  δ {cfg.DELTA_LONG_MIN:.0%}-{cfg.DELTA_LONG_MAX:.0%} + green + ρ≥{cfg.DENSITY_LONG_MIN:.0%}
+  SHORT: δ {cfg.DELTA_SHORT_MIN:.0%}-{cfg.DELTA_SHORT_MAX:.0%} + red + ρ≤{cfg.DENSITY_SHORT_MAX:.0%}
+  Vol:   {cfg.VOL_MIN}-{cfg.VOL_MAX}x │ SL:{cfg.STOP_LOSS_PCT}% │ TP@{cfg.TRAILING_ACTIVATE}%
+  Exit:  BTC_REVERSAL | STOP_LOSS | TRAILING_TP | TIMEOUT {cfg.MAX_HOLD_CANDLES}×{cfg.KLINE_INTERVAL}min
   Warmup: {cfg.WARMUP_CANDLES}×{cfg.KLINE_INTERVAL}min
 """)
 
@@ -32,19 +34,18 @@ def render(eng: WolfEngine):
     ready.sort(key=lambda x: x["delta"], reverse=True)
     cls()
     trend = eq.get("btc_trend","?")
-    if trend == "UP": ba = f"{G}▲ LONG{RST}"
-    elif trend == "WEAK": ba = f"{Y}▲ WEAK{RST}"
-    else: ba = f"{R}▼ WAIT{RST}"
+    if trend == "UP": ba = f"{G}▲{RST}"
+    elif trend == "WEAK": ba = f"{Y}~{RST}"
+    else: ba = f"{R}▼{RST}"
     pc = G if eq["pnl"] >= 0 else R
-    longs = eq.get("longs",0)
+    longs = eq.get("longs",0); shorts = eq.get("shorts",0)
     blk = eq.get("block_reasons",{})
     blk_str = " ".join(f"{k}:{v}" for k,v in blk.items()) if blk else ""
-    print(f"{B}WOLF v4.1{RST} │ BTC{ba} │ {Y}{cfg.LEVERAGE}x{RST} │ "
+    print(f"{B}WOLF v6 RESEARCH{RST} │ BTC{ba}{trend} │ {Y}{cfg.LEVERAGE}x{RST} │ "
           f"PnL:{pc}${eq['pnl']:+.2f}{RST} │ "
           f"{eq['trades']}t WR:{eq['wr']:.0f}% │ "
-          f"{G}L:{longs}{RST} │ "
+          f"{G}L:{longs}{RST} {R}S:{shorts}{RST} │ "
           f"open:{eq['open']} │ "
-          f"{R+'⏸'+RST+' │ ' if eq.get('paused') else ''}"
           f"{D}{el:.0f}s{RST}")
     print(f"{D}{'─'*74}{RST}")
     if eq["trades"] > 0:
@@ -70,28 +71,31 @@ def render(eng: WolfEngine):
             s = it["symbol"].replace("USDT","")
             d = it["delta"]; dens = it["density"]
             # Delta coloring
-            if d >= cfg.DELTA_MIN and d < cfg.DELTA_MAX:
-                dc = f"{G}{d:>+5.0%}{RST}"
-            else:
-                dc = f"{D}{d:>+5.0%}{RST}"
+            if d >= cfg.DELTA_LONG_MIN: dc = f"{G}{d:>+5.0%}{RST}"
+            elif d <= cfg.DELTA_SHORT_MAX: dc = f"{R}{d:>+5.0%}{RST}"
+            else: dc = f"{D}{d:>+5.0%}{RST}"
 
-            if dens >= 0.60: db = f"{G}{dens:>4.0%}{RST}"
-            elif dens <= 0.40: db = f"{R}{dens:>4.0%}{RST}"
+            if dens >= cfg.DENSITY_LONG_MIN: db = f"{G}{dens:>4.0%}{RST}"
+            elif dens <= cfg.DENSITY_SHORT_MAX: db = f"{R}{dens:>4.0%}{RST}"
             else: db = f"{D}{dens:>4.0%}{RST}"
 
-            # Vol
             v = it["vol"]
-            vc = f"{Y}{v:>4.1f}x{RST}" if v >= 1.2 else f"{D}{v:>4.1f}x{RST}"
+            vc = f"{Y}{v:>4.1f}x{RST}" if v >= 1.0 else f"{D}{v:>4.1f}x{RST}"
 
             sig = ""
-            if (eng.btc_up and d >= cfg.DELTA_MIN and d < cfg.DELTA_MAX):
-                sig = f"{G}◄ WOLF{RST}"
+            if d >= cfg.DELTA_LONG_MIN and dens >= cfg.DENSITY_LONG_MIN:
+                sig = f"{G}◄ LONG{RST}"
+            elif d <= cfg.DELTA_SHORT_MAX and dens <= cfg.DENSITY_SHORT_MAX:
+                sig = f"{R}◄ SHORT{RST}"
 
             for pos in eng.open:
                 if pos.symbol == it["symbol"]:
-                    pnl = (it["price"] - pos.entry_price) / pos.entry_price * 100
+                    if pos.side == "LONG":
+                        pnl = (it["price"] - pos.entry_price) / pos.entry_price * 100
+                    else:
+                        pnl = (pos.entry_price - it["price"]) / pos.entry_price * 100
                     c = G if pnl >= 0 else R
-                    sig = f"{c}[LONG {pnl:+.2f}%]{RST}"
+                    sig = f"{c}[{pos.side} {pnl:+.2f}%]{RST}"
 
             print(f"  {s:<8} {dc} {db} {vc}  {it['price']:>10.4f}  {sig}")
 
