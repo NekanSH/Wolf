@@ -121,17 +121,11 @@ class WolfEngine:
 
             exit_reason = None
 
-            # 1. BTC reversal against position
-            if pos.side == "LONG" and not self.btc_up:
-                exit_reason = "BTC_REVERSAL"
-            elif pos.side == "SHORT" and self.btc_up and self.btc_momentum:
-                exit_reason = "BTC_REVERSAL"
-
-            # 2. STOP LOSS
+            # 1. STOP LOSS (фактически отключён - cfg.STOP_LOSS_PCT = -99)
             if not exit_reason and current_pnl <= cfg.STOP_LOSS_PCT:
                 exit_reason = "STOP_LOSS"
 
-            # 3. TRAILING TP
+            # 2. TRAILING TP → lock profit when peak ≥ 0.20%
             if not exit_reason and pos.max_pnl >= cfg.TRAILING_ACTIVATE:
                 new_floor = pos.max_pnl - cfg.TRAILING_DISTANCE
                 if new_floor > pos.trailing_floor:
@@ -139,7 +133,7 @@ class WolfEngine:
                 if current_pnl <= pos.trailing_floor:
                     exit_reason = "TRAILING_TP"
 
-            # 4. TIMEOUT
+            # 3. TIMEOUT
             if not exit_reason and held >= cfg.MAX_HOLD_CANDLES:
                 exit_reason = "TIMEOUT"
 
