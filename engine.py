@@ -121,11 +121,17 @@ class WolfEngine:
 
             exit_reason = None
 
-            # 1. STOP LOSS (фактически отключён - cfg.STOP_LOSS_PCT = -99)
+            # 1. STALE EXIT — мертвая позиция (ключевой фикс)
+            # Если за 3 свечи (15 мин) цена не дала 0.07% → выходим
+            # Данные: 44% позиций peak<0.05%, тянутся до timeout -$783
+            if not exit_reason and held >= cfg.STALE_CANDLES and pos.max_pnl < cfg.STALE_PEAK_MIN:
+                exit_reason = "STALE"
+
+            # 2. STOP LOSS (фактически отключён - cfg.STOP_LOSS_PCT = -99)
             if not exit_reason and current_pnl <= cfg.STOP_LOSS_PCT:
                 exit_reason = "STOP_LOSS"
 
-            # 2. TRAILING TP → lock profit when peak ≥ 0.20%
+            # 3. TRAILING TP → lock profit when peak ≥ 0.20%
             if not exit_reason and pos.max_pnl >= cfg.TRAILING_ACTIVATE:
                 new_floor = pos.max_pnl - cfg.TRAILING_DISTANCE
                 if new_floor > pos.trailing_floor:
@@ -133,7 +139,7 @@ class WolfEngine:
                 if current_pnl <= pos.trailing_floor:
                     exit_reason = "TRAILING_TP"
 
-            # 3. TIMEOUT
+            # 4. TIMEOUT (25 мин = 5 свечей)
             if not exit_reason and held >= cfg.MAX_HOLD_CANDLES:
                 exit_reason = "TIMEOUT"
 
