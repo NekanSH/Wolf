@@ -45,6 +45,7 @@ class WolfEngine:
         self.btc_momentum = True
         self.btc_trend = "UP"
         self._btc_prev_ema5 = 0.0
+        self._btc_prices: list[float] = []  # last 6 candles for velocity
 
         self.open: list[Position] = []
         self.closed: list[Position] = []
@@ -81,22 +82,46 @@ class WolfEngine:
         if not st: return
         c = Candle(ts=cd["ts"],o=cd["o"],h=cd["h"],l=cd["l"],c=cd["c"],v=cd["v"])
 
-        # ── BTC UPDATE ──
+        # ── BTC STATE: velocity-based, not just EMA ──
         if symbol == cfg.BTC_SYMBOL:
             st.on_candle(c, True)
             if st.ema_fast.ready and st.ema_mid.ready:
                 ema5 = st.ema_fast.value
                 ema15 = st.ema_mid.value
                 self.btc_up = ema5 > ema15
-                if self._btc_prev_ema5 > 0:
-                    self.btc_momentum = ema5 > self._btc_prev_ema5
+
+                # Track BTC price history for velocity
+                self._btc_prices.append(c.c)
+                if len(self._btc_prices) > 6:
+                    self._btc_prices.pop(0)
+
+                # EMA momentum (existing)
+                ema_rising = ema5 > self._btc_prev_ema5 if self._btc_prev_ema5 > 0 else True
                 self._btc_prev_ema5 = ema5
-                if self.btc_up and self.btc_momentum:
+
+                # VELOCITY: compare last 3 candles vs previous 3 candles
+                # This catches impulse decay BEFORE EMA catches it
+                vel_weak = False
+                if len(self._btc_prices) >= 6:
+                    # Movement in last 3 candles
+                    recent = (self._btc_prices[-1] - self._btc_prices[-3]) / self._btc_prices[-3] * 100
+                    # Movement in previous 3 candles
+                    prev = (self._btc_prices[-3] - self._btc_prices[-6]) / self._btc_prices[-6] * 100
+                    # If momentum decelerating significantly → WEAK
+                    if prev > cfg.BTC_VELOCITY_MIN and recent < prev * cfg.BTC_VELOCITY_DECAY:
+                        vel_weak = True
+
+                # STRONG: EMA rising AND no velocity decay
+                # WEAK: either EMA falling OR velocity decaying
+                if self.btc_up and ema_rising and not vel_weak:
                     self.btc_trend = "UP"
+                    self.btc_momentum = True
                 elif self.btc_up:
-                    self.btc_trend = "WEAK"  # display only, NO exit
+                    self.btc_trend = "WEAK"
+                    self.btc_momentum = False
                 else:
                     self.btc_trend = "DOWN"
+                    self.btc_momentum = False
             return
 
         st.on_candle(c, self.btc_up)
@@ -131,13 +156,25 @@ class WolfEngine:
             if not exit_reason and current_pnl <= cfg.STOP_LOSS_PCT:
                 exit_reason = "STOP_LOSS"
 
-            # 3. TRAILING TP → lock profit when peak ≥ 0.20%
-            if not exit_reason and pos.max_pnl >= cfg.TRAILING_ACTIVATE:
-                new_floor = pos.max_pnl - cfg.TRAILING_DISTANCE
-                if new_floor > pos.trailing_floor:
-                    pos.trailing_floor = new_floor
-                if current_pnl <= pos.trailing_floor:
-                    exit_reason = "TRAILING_TP"
+            # 3. ADAPTIVE TRAILING TP
+            # BTC STRONG → ждём 0.18%, отдаём 0.09% (даём дышать)
+            # BTC WEAK   → фиксируем раньше: 0.12%, отдаём 0.05%
+            # Не выходим по BTC_WEAK — меняем поведение trailing
+            if not exit_reason:
+                if self.btc_momentum:  # EMA5 растёт → STRONG
+                    t_activate = cfg.TRAILING_ACTIVATE_STRONG
+                    t_distance = cfg.TRAILING_DISTANCE_STRONG
+                else:                  # EMA5 падает → WEAK
+                    t_activate = cfg.TRAILING_ACTIVATE_WEAK
+                    t_distance = cfg.TRAILING_DISTANCE_WEAK
+
+                if pos.max_pnl >= t_activate:
+                    new_floor = pos.max_pnl - t_distance
+                    if new_floor > pos.trailing_floor:
+                        pos.trailing_floor = new_floor
+                    if current_pnl <= pos.trailing_floor:
+                        mode = "STRONG" if self.btc_momentum else "WEAK"
+                        exit_reason = f"TRAILING_{mode}"
 
             # 4. TIMEOUT (25 мин = 5 свечей)
             if not exit_reason and held >= cfg.MAX_HOLD_CANDLES:

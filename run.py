@@ -20,7 +20,7 @@ def banner(mode):
   {mode} │ {len(cfg.SYMBOLS)} symbols │ {cfg.KLINE_INTERVAL}min │ {Y}{cfg.LEVERAGE}x{RST} ${e:.0f}
   LONG:  δ {cfg.DELTA_LONG_MIN:.0%}-{cfg.DELTA_LONG_MAX:.0%} + green + ρ≥{cfg.DENSITY_LONG_MIN:.0%}
   SHORT: δ {cfg.DELTA_SHORT_MIN:.0%}-{cfg.DELTA_SHORT_MAX:.0%} + red + ρ≤{cfg.DENSITY_SHORT_MAX:.0%}
-  Vol:   {cfg.VOL_MIN}-{cfg.VOL_MAX}x │ SL:{cfg.STOP_LOSS_PCT}% │ TP@{cfg.TRAILING_ACTIVATE}%
+  Vol:   {cfg.VOL_MIN}-{cfg.VOL_MAX}x │ SL:{cfg.STOP_LOSS_PCT}% │ TP STRONG@{cfg.TRAILING_ACTIVATE_STRONG}% WEAK@{cfg.TRAILING_ACTIVATE_WEAK}%
   Exit:  BTC_REVERSAL | STOP_LOSS | TRAILING_TP | TIMEOUT {cfg.MAX_HOLD_CANDLES}×{cfg.KLINE_INTERVAL}min
   Warmup: {cfg.WARMUP_CANDLES}×{cfg.KLINE_INTERVAL}min
 """)

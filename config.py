@@ -37,18 +37,19 @@ MOMENTUM_LOOKBACK = 5; HIGH_LOW_LOOKBACK = 20; DENSITY_HISTORY = 5
 DELTA_VOLUME_MIN_MULT = 1.0
 BTC_TREND_WEIGHT = True
 
-# ─── ENTRY (RESEARCH MODE - широкие фильтры для сбора данных) ──
-DELTA_LONG_MIN = 0.40           # было 0.50 — собираем больше данных
-DELTA_LONG_MAX = 0.90           # было 0.70
-DELTA_SHORT_MIN = -0.90         # SHORT зеркально
+# ─── ENTRY ────────────────────────────────────────────────────
+# 654 сделки: vol<0.5 генерирует мёртвые сделки → поднимаем порог
+DELTA_LONG_MIN = 0.40
+DELTA_LONG_MAX = 0.90
+DELTA_SHORT_MIN = -0.90
 DELTA_SHORT_MAX = -0.40
-VOL_MIN = 0.2                   # было 0.3
-VOL_MAX = 8.0                   # было 2.0
-DENSITY_LONG_MIN = 0.60         # было 0.75 — мягче
-DENSITY_SHORT_MAX = 0.40        # SHORT зеркально
+VOL_MIN = 0.5                   # было 0.2 → low vol = dead trades
+VOL_MAX = 8.0
+DENSITY_LONG_MIN = 0.60
+DENSITY_SHORT_MAX = 0.40
 
 # Entry mode: ALL | LONG_ONLY | SHORT_ONLY
-ENTRY_MODE = "ALL"              # собираем данные во всех режимах
+ENTRY_MODE = "ALL"
 
 # ─── STOP LOSS ─────────────────────────────────────────────────
 # ОТКЛЮЧЁН: данные 189 сделок → SL -0.20% = 53t, -$217 (весь убыток)
@@ -67,20 +68,40 @@ MAX_SIMULTANEOUS = 6
 MAX_HOLD_CANDLES = 5            # было 6 (30мин) → 5 (25мин), hold=5 даёт 55% WR
 COOLDOWN_CANDLES = 2
 
-# ─── STALE EXIT (ключевой фикс) ──────────────────────────────
-# Если за 3 свечи (15 мин) пик не достиг 0.07% → мертвая позиция → выход
-# Данные: 44% позиций peak<0.05%, сидят 30 мин до timeout
-STALE_CANDLES = 3               # сколько свечей ждём
-STALE_PEAK_MIN = 0.07           # если peak ниже этого → мертвая
+# ─── STALE EXIT ──────────────────────────────────────────────
+# Данные: STALE 60t, 0% WR = правильно убивает мёртвых
+# Но hold=3 (15мин) слишком рано — поднимаем до hold=4 (20мин)
+# и порог 0.10% (было 0.07%) — позиция должна хоть немного двинуться
+STALE_CANDLES = 4               # было 3 — ждём 20 мин
+STALE_PEAK_MIN = 0.10           # было 0.07 — нужно хоть 0.10% движение
 
-# ─── TRAILING TP ─────────────────────────────────────────────
-# Было 0.20% → только 20% сделок активировали trailing
-# Снизили до 0.10% → поймаем ~30% сделок (вместо 20%)
-# Данные: TRAILING_TP даёт 63% WR +$72 — это лучший выход
-TRAILING_ACTIVATE = 0.10        # было 0.20
-TRAILING_DISTANCE = 0.06        # было 0.10 (ближе = меньше отдаём)
+# ─── TRAILING TP — ADAPTIVE ──────────────────────────────────
+# GPT insight: не выходить по BTC_WEAK, а менять trailing
+#
+# BTC STRONG (EMA5 растёт):
+#   TRAILING_ACTIVATE = 0.18% — ждём нормальный импульс
+#   TRAILING_DISTANCE = 0.09% — 50% giveback от пика
+#
+# BTC WEAK (EMA5 падает, но ещё > EMA15):
+#   TRAILING_ACTIVATE = 0.12% — фиксируем раньше
+#   TRAILING_DISTANCE = 0.05% — 30% giveback, быстро
+#
+TRAILING_ACTIVATE_STRONG = 0.18
+TRAILING_DISTANCE_STRONG = 0.09
+
+TRAILING_ACTIVATE_WEAK = 0.12
+TRAILING_DISTANCE_WEAK = 0.05
 
 # ─── BTC ──────────────────────────────────────────────────────
+# ─── BTC VELOCITY (impulse decay detection) ──────────────────
+# GPT: EMA слишком тупой — не видит ослабление импульса
+# Решение: сравниваем скорость движения BTC
+#   recent = движение за последние 3 свечи
+#   prev   = движение за предыдущие 3 свечи
+#   если prev > 0.10% И recent < prev × 0.5 → импульс умер → WEAK
+BTC_VELOCITY_MIN = 0.10         # предыдущее движение должно быть значимым
+BTC_VELOCITY_DECAY = 0.5        # если текущее < 50% от предыдущего → WEAK
+
 BTC_SYMBOL = "BTCUSDT"
 
 # ─── NO KILL SWITCH ───────────────────────────────────────────
