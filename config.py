@@ -38,25 +38,19 @@ DELTA_VOLUME_MIN_MULT = 1.0
 BTC_TREND_WEIGHT = True
 
 # ─── ENTRY — ТОЛЬКО СИЛЬНЫЕ СИГНАЛЫ ─────────────────────────
-# 283 сделки: 64% входов = мертвые (STALE) = -$393
-# Причина: delta 0.40-0.65 = слабый сигнал, платим комиссию и ждём
-# Фикс: только реальные импульсы δ≥0.65, vol≥1.0, ρ≥0.70
-DELTA_LONG_MIN = 0.65           # было 0.40 → -64% мёртвых входов
+DELTA_LONG_MIN = 0.65           
 DELTA_LONG_MAX = 0.90
 DELTA_SHORT_MIN = -0.90
-DELTA_SHORT_MAX = -0.65         # было -0.40
-VOL_MIN = 1.0                   # было 0.5 → низкий объём = нет движения
+DELTA_SHORT_MAX = -0.65         
+VOL_MIN = 1.0                   
 VOL_MAX = 8.0
-DENSITY_LONG_MIN = 0.70         # было 0.60
-DENSITY_SHORT_MAX = 0.30        # зеркально
+DENSITY_LONG_MIN = 0.70         
+DENSITY_SHORT_MAX = 0.30        
 
 # Entry mode: ALL | LONG_ONLY | SHORT_ONLY
 ENTRY_MODE = "ALL"
 
 # ─── STOP LOSS ─────────────────────────────────────────────────
-# ОТКЛЮЧЁН: данные 189 сделок → SL -0.20% = 53t, -$217 (весь убыток)
-# 5-мин шум легко -0.20%, потом цена возвращается. SL = убиваем себя.
-# Без SL система = -$0.66. Выходим только TRAILING + TIMEOUT.
 STOP_LOSS_PCT = -99.0           # отключено
 
 # ─── COMMISSIONS ──────────────────────────────────────────────
@@ -67,27 +61,14 @@ LEVERAGE = 10
 SHADOW_MODE = True
 POSITION_SIZE_USDT = 100.0
 MAX_SIMULTANEOUS = 6
-MAX_HOLD_CANDLES = 5            # было 6 (30мин) → 5 (25мин), hold=5 даёт 55% WR
+MAX_HOLD_CANDLES = 5            
 COOLDOWN_CANDLES = 2
 
 # ─── STALE EXIT ──────────────────────────────────────────────
-# Данные: STALE 60t, 0% WR = правильно убивает мёртвых
-# Но hold=3 (15мин) слишком рано — поднимаем до hold=4 (20мин)
-# и порог 0.10% (было 0.07%) — позиция должна хоть немного двинуться
-STALE_CANDLES = 4               # было 3 — ждём 20 мин
-STALE_PEAK_MIN = 0.10           # было 0.07 — нужно хоть 0.10% движение
+STALE_CANDLES = 4               
+STALE_PEAK_MIN = 0.10           
 
 # ─── TRAILING TP — ADAPTIVE ──────────────────────────────────
-# GPT insight: не выходить по BTC_WEAK, а менять trailing
-#
-# BTC STRONG (EMA5 растёт):
-#   TRAILING_ACTIVATE = 0.18% — ждём нормальный импульс
-#   TRAILING_DISTANCE = 0.09% — 50% giveback от пика
-#
-# BTC WEAK (EMA5 падает, но ещё > EMA15):
-#   TRAILING_ACTIVATE = 0.12% — фиксируем раньше
-#   TRAILING_DISTANCE = 0.05% — 30% giveback, быстро
-#
 TRAILING_ACTIVATE_STRONG = 0.18
 TRAILING_DISTANCE_STRONG = 0.09
 
@@ -96,24 +77,10 @@ TRAILING_DISTANCE_WEAK = 0.05
 
 # ─── BTC ──────────────────────────────────────────────────────
 # ─── ANTI-STALE CONFIRMATION ─────────────────────────────────
-# GPT инсайт: мы входим ПОСЛЕ движения — покупаем хвост
-# Фикс: после сигнала ждём подтверждения что импульс ПРОДОЛЖАЕТСЯ
-#
-# Как работает:
-#   1. Свеча закрылась → сигнал в PENDING (не входим)
-#   2. Следующие реальные сделки (on_trade) накапливают объём
-#   3. Если за ~30 сек набрался CONFIRM_VOL_MULT × baseline vol → ENTER
-#   4. Если новая свеча пришла раньше → SKIP (сигнал протух = STALE)
-#
-# CONFIRM_VOL_MULT: сколько baseline объёма нужно для подтверждения
-# Больше = строже (меньше ложных, но и меньше входов)
 CONFIRM_VOL_MULT = 0.3          # нужно 30% от baseline volume в направлении
 CONFIRM_BASE_VOL = 100.0        # минимальный baseline если тик пустой
-# GPT: EMA слишком тупой — не видит ослабление импульса
-# Решение: сравниваем скорость движения BTC
-#   recent = движение за последние 3 свечи
-#   prev   = движение за предыдущие 3 свечи
-#   если prev > 0.10% И recent < prev × 0.5 → импульс умер → WEAK
+CONFIRM_TIMEOUT_SEC = 30        # ФИКС: ТАЙМАУТ: сколько секунд ждем подтверждения
+
 BTC_VELOCITY_MIN = 0.10         # предыдущее движение должно быть значимым
 BTC_VELOCITY_DECAY = 0.5        # если текущее < 50% от предыдущего → WEAK
 
