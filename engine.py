@@ -63,6 +63,11 @@ class WolfEngine:
         self._consecutive_losses = 0
         self._tightened = False
 
+        # ANTI-STALE: pending signals queue
+        # Сигнал не входит сразу — ждёт подтверждения из trade stream
+        # {symbol: {side, delta, density, vol_r, entry_price, confirmed_volume, candle}}
+        self._pending: dict[str, dict] = {}
+
         self._init_csv()
 
     def _init_csv(self):
@@ -230,43 +235,128 @@ class WolfEngine:
         else:
             return
 
-        # ═══ ENTER ═══
-        self.signals += 1
-        if side == "LONG": self.long_count += 1
-        else: self.short_count += 1
-        self._last_trade_candle[symbol] = sym_candle
-        self._daily_trades += 1
+        # ══════════════════════════════════════════
+        # ANTI-STALE: НЕ входим сразу
+        # Кладём в очередь ожидания подтверждения
+        # Подтверждение придёт через on_trade если
+        # импульс продолжится в следующих тиках
+        # ══════════════════════════════════════════
 
-        pos = Position(symbol=symbol, entry_price=c.c, entry_candle=sym_candle,
-                       entry_density=density, entry_delta=delta,
-                       entry_vol_ratio=vol_r, side=side)
-        # Tag with market regime
-        pos.btc_regime = self.btc_trend  # UP / WEAK / DOWN
-        self.open.append(pos)
+        # Очистить протухший pending для этого символа
+        if symbol in self._pending:
+            old = self._pending[symbol]
+            if sym_candle > old["candle"]:
+                # Новая свеча — старый сигнал протух → SKIP
+                self.block_reasons["pending_expired"] = self.block_reasons.get("pending_expired",0) + 1
+                del self._pending[symbol]
 
-        with open(cfg.CSV_SIGNALS, "a", newline="") as f:
-            csv.writer(f).writerow([c.ts, symbol, side, c.c,
-                round(delta,4), round(density,4), round(vol_r,2),
-                self.btc_trend])
+        # Не перезаписывать если уже есть живой pending
+        if symbol in self._pending: return
+
+        # Количество volume нужное для подтверждения
+        # Берём текущий тик объём как baseline
+        current_tick_vol = st.tick_buy_vol if side == "LONG" else st.tick_sell_vol
+
+        self._pending[symbol] = {
+            "side": side,
+            "delta": delta,
+            "density": density,
+            "vol_r": vol_r,
+            "entry_price": c.c,
+            "entry_vol": max(current_tick_vol, cfg.CONFIRM_BASE_VOL),
+            "confirm_vol": 0.0,
+            "candle": sym_candle,
+            "btc_regime": self.btc_trend,
+        }
 
         if cfg.LOG_TO_CONSOLE:
-            sc = "\033[32m" if side == "LONG" else "\033[31m"
-            print(f"  {sc}▶ {side} {symbol} @ {c.c:.4f}  "
+            sc = "\033[33m"  # жёлтый = ожидание
+            print(f"  {sc}⏳ PENDING {side} {symbol} @ {c.c:.4f}  "
                   f"δ={delta:+.0%} ρ={density:.0%} vol={vol_r:.1f}x "
-                  f"BTC={self.btc_trend}\033[0m")
+                  f"BTC={self.btc_trend} — ждём подтверждения...\033[0m")
 
     async def on_trade(self, symbol, trade):
+        """
+        Trade stream — каждая реальная сделка на бирже.
+        ANTI-STALE: используем для подтверждения что импульс ПРОДОЛЖАЕТСЯ.
+
+        Логика:
+        1. Свеча закрылась → сигнал кладём в _pending (НЕ входим сразу)
+        2. Следующие тики приходят через on_trade
+        3. Считаем объём В НАПРАВЛЕНИИ сигнала за cfg.CONFIRM_SECONDS
+        4. Если объём > cfg.CONFIRM_VOL_MULT × entry_vol → ВХОДИМ
+        5. Если таймаут (новая свеча пришла) → SKIP (сигнал протух)
+        """
         st = self.states.get(symbol)
         if not st: return
         s = trade.get("S",""); sz = float(trade.get("v",0))
         if s == "Buy": st.tick_buy_vol += sz
         elif s == "Sell": st.tick_sell_vol += sz
 
+        # Check pending signals for this symbol
+        if symbol not in self._pending: return
+        pend = self._pending[symbol]
+
+        # Accumulate volume in signal direction
+        if pend["side"] == "LONG" and s == "Buy":
+            pend["confirm_vol"] += sz
+        elif pend["side"] == "SHORT" and s == "Sell":
+            pend["confirm_vol"] += sz
+
+        # Check if confirmation threshold reached
+        needed = pend["entry_vol"] * cfg.CONFIRM_VOL_MULT
+        if pend["confirm_vol"] >= needed:
+            # ✅ CONFIRMED — impulse continues, enter now
+            self._enter_confirmed(symbol, pend)
+            del self._pending[symbol]
+
+    def _enter_confirmed(self, symbol: str, pend: dict):
+        """
+        Вход ПОСЛЕ подтверждения продолжения импульса.
+        Вызывается из on_trade когда накопился нужный объём.
+        """
+        st = self.states.get(symbol)
+        if not st: return
+
+        # Проверки риска
+        if any(p.symbol == symbol for p in self.open): return
+        if len(self.open) >= cfg.MAX_SIMULTANEOUS: return
+
+        side = pend["side"]
+        price = st.last_price if st.last_price > 0 else pend["entry_price"]
+        sym_candle = pend["candle"]
+
+        self.signals += 1
+        if side == "LONG": self.long_count += 1
+        else: self.short_count += 1
+        self._last_trade_candle[symbol] = sym_candle
+        self._daily_trades += 1
+
+        pos = Position(symbol=symbol, entry_price=price,
+                       entry_candle=sym_candle,
+                       entry_density=pend["density"],
+                       entry_delta=pend["delta"],
+                       entry_vol_ratio=pend["vol_r"],
+                       side=side)
+        pos.btc_regime = pend["btc_regime"]
+        self.open.append(pos)
+
+        with open(cfg.CSV_SIGNALS, "a", newline="") as f:
+            csv.writer(f).writerow([int(time.time()*1000), symbol, side, price,
+                round(pend["delta"],4), round(pend["density"],4),
+                round(pend["vol_r"],2), pend["btc_regime"]])
+
+        if cfg.LOG_TO_CONSOLE:
+            sc = "\033[32m" if side == "LONG" else "\033[31m"
+            print(f"  {sc}▶ CONFIRMED {side} {symbol} @ {price:.4f}  "
+                  f"δ={pend['delta']:+.0%} vol={pend['vol_r']:.1f}x "
+                  f"BTC={pend['btc_regime']}\033[0m")
+
     def _close(self, pos, price, held, reason):
         pos.exit_price = price
         if pos.side == "LONG":
             raw_pnl = (price - pos.entry_price) / pos.entry_price * 100
-        else:  # SHORT
+        else:
             raw_pnl = (pos.entry_price - price) / pos.entry_price * 100
         commission = cfg.COMMISSION_PCT * 2
         pos.pnl_pct = raw_pnl - commission
@@ -275,13 +365,10 @@ class WolfEngine:
         pos.exit_reason = reason
         self.total_pnl += pos.pnl_usdt
         self.closed.append(pos)
-
-        # Loss streak
         if pos.pnl_usdt <= 0:
             self._consecutive_losses += 1
         else:
             self._consecutive_losses = 0
-
         with open(cfg.CSV_TRADES, "a", newline="") as f:
             csv.writer(f).writerow([pos.symbol, pos.side,
                 round(pos.entry_price,6), round(pos.exit_price,6),
@@ -290,13 +377,12 @@ class WolfEngine:
                 round(pos.entry_density,4), round(pos.entry_delta,4),
                 round(pos.entry_vol_ratio,2), round(pos.max_pnl,4),
                 reason, getattr(pos, 'btc_regime', 'UP')])
-
         if cfg.LOG_TO_CONSOLE:
-            c = "\033[32m" if pos.pnl_usdt >= 0 else "\033[31m"
+            col = "\033[32m" if pos.pnl_usdt >= 0 else "\033[31m"
             fee = pos.size_usdt * pos.leverage * commission / 100
-            print(f"  {c}◀ {pos.side} {pos.symbol} {pos.pnl_pct:+.3f}% "
+            print(f"  {col}◀ {pos.side} {pos.symbol} {pos.pnl_pct:+.3f}% "
                   f"${pos.pnl_usdt:+.2f} (fee:${fee:.2f}) "
-                  f"held={held}×5m [{reason}] BTC={getattr(pos,'btc_regime','?')}\033[0m")
+                  f"held={held}×5m [{reason}]\033[0m")
 
     def snapshot(self):
         return [{"symbol":s, "density":round(self.states[s].density,4),

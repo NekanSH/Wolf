@@ -37,16 +37,18 @@ MOMENTUM_LOOKBACK = 5; HIGH_LOW_LOOKBACK = 20; DENSITY_HISTORY = 5
 DELTA_VOLUME_MIN_MULT = 1.0
 BTC_TREND_WEIGHT = True
 
-# ─── ENTRY ────────────────────────────────────────────────────
-# 654 сделки: vol<0.5 генерирует мёртвые сделки → поднимаем порог
-DELTA_LONG_MIN = 0.40
+# ─── ENTRY — ТОЛЬКО СИЛЬНЫЕ СИГНАЛЫ ─────────────────────────
+# 283 сделки: 64% входов = мертвые (STALE) = -$393
+# Причина: delta 0.40-0.65 = слабый сигнал, платим комиссию и ждём
+# Фикс: только реальные импульсы δ≥0.65, vol≥1.0, ρ≥0.70
+DELTA_LONG_MIN = 0.65           # было 0.40 → -64% мёртвых входов
 DELTA_LONG_MAX = 0.90
 DELTA_SHORT_MIN = -0.90
-DELTA_SHORT_MAX = -0.40
-VOL_MIN = 0.5                   # было 0.2 → low vol = dead trades
+DELTA_SHORT_MAX = -0.65         # было -0.40
+VOL_MIN = 1.0                   # было 0.5 → низкий объём = нет движения
 VOL_MAX = 8.0
-DENSITY_LONG_MIN = 0.60
-DENSITY_SHORT_MAX = 0.40
+DENSITY_LONG_MIN = 0.70         # было 0.60
+DENSITY_SHORT_MAX = 0.30        # зеркально
 
 # Entry mode: ALL | LONG_ONLY | SHORT_ONLY
 ENTRY_MODE = "ALL"
@@ -93,7 +95,20 @@ TRAILING_ACTIVATE_WEAK = 0.12
 TRAILING_DISTANCE_WEAK = 0.05
 
 # ─── BTC ──────────────────────────────────────────────────────
-# ─── BTC VELOCITY (impulse decay detection) ──────────────────
+# ─── ANTI-STALE CONFIRMATION ─────────────────────────────────
+# GPT инсайт: мы входим ПОСЛЕ движения — покупаем хвост
+# Фикс: после сигнала ждём подтверждения что импульс ПРОДОЛЖАЕТСЯ
+#
+# Как работает:
+#   1. Свеча закрылась → сигнал в PENDING (не входим)
+#   2. Следующие реальные сделки (on_trade) накапливают объём
+#   3. Если за ~30 сек набрался CONFIRM_VOL_MULT × baseline vol → ENTER
+#   4. Если новая свеча пришла раньше → SKIP (сигнал протух = STALE)
+#
+# CONFIRM_VOL_MULT: сколько baseline объёма нужно для подтверждения
+# Больше = строже (меньше ложных, но и меньше входов)
+CONFIRM_VOL_MULT = 0.3          # нужно 30% от baseline volume в направлении
+CONFIRM_BASE_VOL = 100.0        # минимальный baseline если тик пустой
 # GPT: EMA слишком тупой — не видит ослабление импульса
 # Решение: сравниваем скорость движения BTC
 #   recent = движение за последние 3 свечи
