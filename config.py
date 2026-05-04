@@ -107,8 +107,9 @@ TRAILING_DISTANCE_WEAK = 0.05
 #
 # CONFIRM_VOL_MULT: сколько baseline объёма нужно для подтверждения
 # Больше = строже (меньше ложных, но и меньше входов)
-CONFIRM_VOL_MULT = 0.3          # нужно 30% от baseline volume в направлении
-CONFIRM_BASE_VOL = 100.0        # минимальный baseline если тик пустой
+CONFIRM_VOL_MULT = 0.3
+CONFIRM_BASE_VOL = 100.0
+CONFIRM_TIMEOUT_SEC = 30        # секунд ждём подтверждения, потом SKIP
 # GPT: EMA слишком тупой — не видит ослабление импульса
 # Решение: сравниваем скорость движения BTC
 #   recent = движение за последние 3 свечи
@@ -116,6 +117,15 @@ CONFIRM_BASE_VOL = 100.0        # минимальный baseline если ти�
 #   если prev > 0.10% И recent < prev × 0.5 → импульс умер → WEAK
 BTC_VELOCITY_MIN = 0.10         # предыдущее движение должно быть значимым
 BTC_VELOCITY_DECAY = 0.5        # если текущее < 50% от предыдущего → WEAK
+
+# ─── MACRO TREND FILTER ───────────────────────────────────────
+# 838 сделок: нет WR≥55% ни в одном BTC режиме
+# Причина: торгуем в боковике где нет edge
+# Золотая фаза (+$103): BTC был в реальном тренде часами
+# Торгуем ТОЛЬКО когда BTC прошёл ≥0.5% за 2 часа (24 свечи по 5 мин)
+BTC_MACRO_CANDLES = 24          # 24 × 5мин = 2 часа назад
+BTC_MACRO_MIN_MOVE = 0.5        # % движение за 2 часа
+BTC_MACRO_FILTER = True
 
 BTC_SYMBOL = "BTCUSDT"
 
