@@ -1,4 +1,4 @@
-"""Wolf Matrix v8 — Anti-STALE Confirmation Engine"""
+"""Wolf Matrix v8 — Anti-STALE Confirmation Engine (FIXED 2026-05-10)"""
 from __future__ import annotations
 import csv, json, os, time
 from dataclasses import dataclass
@@ -26,9 +26,9 @@ class WolfEngine:
         self.states = {s: SymbolState(s) for s in all_s}
         self.btc_up = True; self.btc_momentum = True; self.btc_trend = "UP"
         self._btc_prev_ema5 = 0.0; self._btc_prices: list[float] = []
-        self._btc_macro_prices: list[float] = []  # для macro filter (48 свечей)
-        self.btc_macro_ok = False  # BTC в реальном тренде?
-        self.btc_macro_dir = "NONE"  # UP / DOWN / SIDE
+        self._btc_macro_prices: list[float] = []
+        self.btc_macro_ok = False
+        self.btc_macro_dir = "NONE"
         self.open: list[Position] = []; self.closed: list[Position] = []
         self.total_pnl = 0.0; self.tick = 0
         self.signals = 0; self.blocked = 0; self.long_count = 0; self.short_count = 0
@@ -62,13 +62,11 @@ class WolfEngine:
                 self._btc_prices.append(c.c)
                 if len(self._btc_prices) > 7: self._btc_prices.pop(0)
 
-                # MACRO FILTER: 2-часовой тренд
                 self._btc_macro_prices.append(c.c)
                 if len(self._btc_macro_prices) > cfg.BTC_MACRO_CANDLES + 1:
                     self._btc_macro_prices.pop(0)
                 if len(self._btc_macro_prices) >= cfg.BTC_MACRO_CANDLES:
-                    oldest = self._btc_macro_prices[0]
-                    newest = self._btc_macro_prices[-1]
+                    oldest = self._btc_macro_prices[0]; newest = self._btc_macro_prices[-1]
                     macro_move = (newest - oldest) / oldest * 100
                     if macro_move >= cfg.BTC_MACRO_MIN_MOVE:
                         self.btc_macro_ok = True; self.btc_macro_dir = "UP"
@@ -102,31 +100,60 @@ class WolfEngine:
             self.block_reasons["pending_expired"] = self.block_reasons.get("pending_expired", 0) + 1
             del self._pending[symbol]
 
-        # EXIT
+        # ── EXIT ──────────────────────────────────────────────────────────
         for pos in self.open:
             if pos.symbol != symbol: continue
-            cur = (c.c - pos.entry_price)/pos.entry_price*100 if pos.side=="LONG" else (pos.entry_price - c.c)/pos.entry_price*100
-            if cur > pos.max_pnl: pos.max_pnl = cur
+
+            # BUG FIX #2: Используем H (LONG) и L (SHORT) для max_pnl,
+            # а не только close. Иначе внутрисвечные пики игнорировались
+            # и trailing не активировался.
+            if pos.side == "LONG":
+                intra_best = (c.h - pos.entry_price) / pos.entry_price * 100
+                cur        = (c.c - pos.entry_price) / pos.entry_price * 100
+            else:
+                intra_best = (pos.entry_price - c.l) / pos.entry_price * 100
+                cur        = (pos.entry_price - c.c) / pos.entry_price * 100
+
+            if intra_best > pos.max_pnl:
+                pos.max_pnl = intra_best
+
             held = sym_candle - pos.entry_candle
             reason = None
+
+            # STALE: позиция не двинулась за STALE_CANDLES свечей
             if held >= cfg.STALE_CANDLES and pos.max_pnl < cfg.STALE_PEAK_MIN:
                 reason = "STALE"
+
+            # STOP LOSS (отключён: STOP_LOSS_PCT = -99)
             if not reason and cur <= cfg.STOP_LOSS_PCT:
                 reason = "STOP_LOSS"
+
+            # TRAILING TP
             if not reason:
                 t_act = cfg.TRAILING_ACTIVATE_STRONG if self.btc_momentum else cfg.TRAILING_ACTIVATE_WEAK
                 t_dis = cfg.TRAILING_DISTANCE_STRONG if self.btc_momentum else cfg.TRAILING_DISTANCE_WEAK
+
                 if pos.max_pnl >= t_act:
+                    # BUG FIX #1: floor никогда не опускаем ниже TRAILING_FLOOR_MIN.
+                    # БЫЛО: floor = max_pnl - distance, мог быть 0.07-0.09% = УБЫТОК.
+                    # СТАЛО: floor = max(max_pnl - distance, FLOOR_MIN) = min $1.00 net.
                     nf = pos.max_pnl - t_dis
-                    if nf > pos.trailing_floor: pos.trailing_floor = nf
+                    nf = max(nf, cfg.TRAILING_FLOOR_MIN)   # жёсткий минимум
+                    if nf > pos.trailing_floor:
+                        pos.trailing_floor = nf
                     if cur <= pos.trailing_floor:
                         reason = "TRAILING_STRONG" if self.btc_momentum else "TRAILING_WEAK"
+
+            # TIMEOUT
             if not reason and held >= cfg.MAX_HOLD_CANDLES:
                 reason = "TIMEOUT"
-            if reason: self._close(pos, c.c, held, reason)
+
+            if reason:
+                self._close(pos, c.c, held, reason)
+
         self.open = [p for p in self.open if p.status == "OPEN"]
 
-        # ENTRY
+        # ── ENTRY ─────────────────────────────────────────────────────────
         if any(p.symbol == symbol for p in self.open): return
         if len(self.open) >= cfg.MAX_SIMULTANEOUS: return
         if symbol in self._pending: return
@@ -138,17 +165,10 @@ class WolfEngine:
         if vol_r < cfg.VOL_MIN: self.block_reasons["vol_low"] += 1; return
         if vol_r >= cfg.VOL_MAX: self.block_reasons["vol_high"] += 1; return
 
-        # MACRO FILTER: торгуем только в реальном тренде BTC (2 часа)
         if cfg.BTC_MACRO_FILTER:
             if not self.btc_macro_ok:
                 self.block_reasons["macro_side"] = self.block_reasons.get("macro_side", 0) + 1
                 return
-            # LONG только если BTC растёт макро, SHORT только если падает
-            if self.btc_macro_dir == "UP" and cfg.ENTRY_MODE == "ALL":
-                # В UP макро тренде — только LONG
-                pass  # long_ok проверится ниже
-            elif self.btc_macro_dir == "DOWN" and cfg.ENTRY_MODE == "ALL":
-                pass  # short_ok проверится ниже
 
         long_ok  = (cfg.ENTRY_MODE in ("ALL","LONG_ONLY") and
                     delta >= cfg.DELTA_LONG_MIN and delta <= cfg.DELTA_LONG_MAX and
@@ -221,7 +241,7 @@ class WolfEngine:
         pos.exit_price = price
         raw = (price-pos.entry_price)/pos.entry_price*100 if pos.side=="LONG" else (pos.entry_price-price)/pos.entry_price*100
         comm = cfg.COMMISSION_PCT * 2
-        pos.pnl_pct = raw - comm
+        pos.pnl_pct  = raw - comm
         pos.pnl_usdt = pos.size_usdt * pos.leverage * pos.pnl_pct / 100
         pos.status = "DONE"; pos.exit_reason = reason
         self.total_pnl += pos.pnl_usdt; self.closed.append(pos)
@@ -237,7 +257,7 @@ class WolfEngine:
         if cfg.LOG_TO_CONSOLE:
             col = "\033[32m" if pos.pnl_usdt>=0 else "\033[31m"
             fee = pos.size_usdt * pos.leverage * comm / 100
-            print(f"  {col}◀ {pos.side} {pos.symbol} {pos.pnl_pct:+.3f}% ${pos.pnl_usdt:+.2f} (fee:${fee:.2f}) held={held}×5m [{reason}]\033[0m")
+            print(f"  {col}◀ {pos.side} {pos.symbol} {pos.pnl_pct:+.3f}% ${pos.pnl_usdt:+.2f} (fee:${fee:.2f}) held={held}×5m peak={pos.max_pnl:.3f}% [{reason}]\033[0m")
 
     def snapshot(self):
         return [{"symbol":s, "density":round(self.states[s].density,4),
