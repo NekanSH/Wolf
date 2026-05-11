@@ -66,7 +66,7 @@ def render(eng: WolfEngine):
         wp = warm[0]["candles"]/cfg.WARMUP_CANDLES*100 if warm else 0
         print(f"  {Y}Warmup {wp:.0f}%{RST}")
     else:
-        print(f"  {'Symbol':<8} {'δ buy':>6} {'ρ':>5} {'vol':>5}  {'Price':>10}  Status")
+        print(f"  {'Symbol':<8} {'δ buy':>6} {'ρ':>5} {'vol':>5}  {'Price':>10}  {'imb':>6} {'vel':>6}  Status")
         for it in ready[:n]:
             s = it["symbol"].replace("USDT","")
             d = it["delta"]; dens = it["density"]
@@ -97,7 +97,10 @@ def render(eng: WolfEngine):
                     c = G if pnl >= 0 else R
                     sig = f"{c}[{pos.side} {pnl:+.2f}%]{RST}"
 
-            print(f"  {s:<8} {dc} {db} {vc}  {it['price']:>10.4f}  {sig}")
+            imb = it.get('imbalance', 0); vel = it.get('velocity', 1.0)
+            ic = f"{G}{imb:>4.2f}x{RST}" if imb >= cfg.BOOK_IMBALANCE_MIN else f"{D}{imb:>4.2f}x{RST}"
+            vc2 = f"{Y}{vel:>4.2f}v{RST}" if vel >= cfg.TICK_VEL_MIN else f"{D}{vel:>4.2f}v{RST}"
+            print(f"  {s:<8} {dc} {db} {vc}  {it['price']:>10.4f}  {ic} {vc2}  {sig}")
 
     if warm:
         print(f"  {D}warming: {len(warm)} ({warm[0]['candles']}/{cfg.WARMUP_CANDLES}){RST}")
@@ -115,7 +118,7 @@ async def run_live(eng):
     if not HAS_WS: print(f"{R}pip install websockets{RST}"); return
     syms = list(cfg.SYMBOLS)
     if cfg.BTC_SYMBOL not in syms: syms.append(cfg.BTC_SYMBOL)
-    feed = BybitFeed(syms, on_candle_close=eng.on_candle, on_trade=eng.on_trade)
+    feed = BybitFeed(syms, on_candle_close=eng.on_candle, on_trade=eng.on_trade, on_orderbook=eng.on_orderbook)
     d = asyncio.create_task(dash_loop(eng, 3.0))
     f = asyncio.create_task(feed.start())
     try: await asyncio.gather(f, d)
@@ -124,7 +127,7 @@ async def run_live(eng):
 async def run_offline(eng):
     from feed import OfflineFeed
     feed = OfflineFeed(cfg.SYMBOLS, on_candle_close=eng.on_candle,
-                       on_trade=eng.on_trade,
+                       on_trade=eng.on_trade, on_orderbook=eng.on_orderbook,
                        candles_per_symbol=300, tick_delay=0.001)
     d = asyncio.create_task(dash_loop(eng, 0.3))
     await feed.start(); d.cancel()
