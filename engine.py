@@ -1,10 +1,22 @@
-"""Wolf Matrix v9 — Orderflow Confirmation Engine"""
+"""Wolf Matrix v10 — Session + Symbol Filter Engine"""
 from __future__ import annotations
 import csv, json, os, time
 from dataclasses import dataclass
 from collections import defaultdict
+from datetime import datetime, timezone
 import config as cfg
 from indicators import Candle, SymbolState
+
+def current_hour_utc() -> int:
+    return datetime.now(timezone.utc).hour
+
+def get_trailing_params(symbol: str) -> tuple[float, float]:
+    """Trailing параметры по символу из данных щенка."""
+    s = symbol.upper()
+    if "SUI" in s: return cfg.SUI_TRAILING_ACTIVATE, cfg.SUI_TRAILING_DISTANCE
+    if "XRP" in s: return cfg.XRP_TRAILING_ACTIVATE, cfg.XRP_TRAILING_DISTANCE
+    if "SOL" in s: return cfg.SOL_TRAILING_ACTIVATE, cfg.SOL_TRAILING_DISTANCE
+    return cfg.ETH_TRAILING_ACTIVATE, cfg.ETH_TRAILING_DISTANCE
 
 @dataclass
 class Position:
@@ -14,8 +26,9 @@ class Position:
     status: str = "OPEN"; side: str = "LONG"
     entry_density: float = 0.0; entry_delta: float = 0.0
     entry_vol_ratio: float = 0.0; max_pnl: float = 0.0
-    trailing_floor: float = -999.0; exit_reason: str = ""; btc_regime: str = "UP"
-    entry_imbalance: float = 0.0; entry_velocity: float = 0.0   # НОВОЕ для анализа
+    trailing_floor: float = -999.0; exit_reason: str = ""
+    btc_regime: str = "UP"; entry_imbalance: float = 0.0
+    entry_velocity: float = 0.0; entry_hour: int = 0
     def __post_init__(self):
         if not self.size_usdt: self.size_usdt = cfg.POSITION_SIZE_USDT
         if self.leverage == 10: self.leverage = cfg.LEVERAGE
@@ -25,19 +38,21 @@ class WolfEngine:
         all_s = list(cfg.SYMBOLS)
         if cfg.BTC_SYMBOL not in all_s: all_s.append(cfg.BTC_SYMBOL)
         self.states = {s: SymbolState(s) for s in all_s}
+
         self.btc_up = True; self.btc_momentum = True; self.btc_trend = "UP"
         self._btc_prev_ema5 = 0.0; self._btc_prices: list[float] = []
         self._btc_macro_prices: list[float] = []
         self.btc_macro_ok = False; self.btc_macro_dir = "NONE"
+
         self.open: list[Position] = []; self.closed: list[Position] = []
         self.total_pnl = 0.0; self.tick = 0
-        self.signals = 0; self.blocked = 0; self.long_count = 0; self.short_count = 0
+        self.signals = 0; self.long_count = 0; self.short_count = 0
+        self.blocked = 0; self._daily_trades = 0
+        self._consecutive_losses = 0; self._tightened = False
         self.t0 = time.monotonic()
         self._last_trade_candle: dict[str, int] = defaultdict(int)
         self.current_leverage = cfg.LEVERAGE
         self.block_reasons: dict[str, int] = defaultdict(int)
-        self._daily_trades = 0; self._consecutive_losses = 0; self._tightened = False
-        # PENDING: {symbol → {..., flow_ok_since, flow_checks}}
         self._pending: dict[str, dict] = {}
         self._init_csv()
 
@@ -47,16 +62,50 @@ class WolfEngine:
                 csv.writer(f).writerow([
                     "symbol","side","entry","exit","pnl_pct","pnl_usdt",
                     "leverage","hold_candles","density","delta","vol_ratio",
-                    "max_pnl","exit_reason","btc_regime","imbalance","velocity"
+                    "max_pnl","exit_reason","btc_regime","imbalance","velocity","hour"
                 ])
         if not os.path.exists(cfg.CSV_SIGNALS):
             with open(cfg.CSV_SIGNALS, "w", newline="") as f:
                 csv.writer(f).writerow([
                     "ts","symbol","side","price","delta","density",
-                    "vol_ratio","btc_trend","imbalance","velocity"
+                    "vol_ratio","btc_trend","imbalance","velocity","hour"
                 ])
 
-    # ── BTC & CANDLE ──────────────────────────────────────────
+    def _check_session(self, side: str, symbol: str) -> tuple[bool, str]:
+        """
+        Проверяем сессию и символ.
+        Возвращает (ok, reason_if_blocked).
+        """
+        hour = current_hour_utc()
+
+        # BTC=WEAK → пауза
+        if cfg.WEAK_PAUSE and self.btc_trend == "WEAK":
+            return False, "btc_weak_pause"
+
+        if side == "LONG":
+            # Только при BTC=UP
+            if self.btc_trend != "UP":
+                return False, "long_needs_btc_up"
+            # Только разрешённые символы
+            if symbol not in cfg.LONG_SYMBOLS:
+                return False, f"long_symbol_blocked_{symbol}"
+            # Только хорошие часы
+            if hour not in cfg.SESSION_LONG_HOURS:
+                return False, f"long_bad_hour_{hour}utc"
+
+        elif side == "SHORT":
+            # Только при BTC=DOWN
+            if self.btc_trend != "DOWN":
+                return False, "short_needs_btc_down"
+            # Только разрешённые символы
+            if symbol not in cfg.SHORT_SYMBOLS:
+                return False, f"short_symbol_blocked_{symbol}"
+            # Только хорошие часы
+            if hour not in cfg.SESSION_SHORT_HOURS:
+                return False, f"short_bad_hour_{hour}utc"
+
+        return True, ""
+
     async def on_candle(self, symbol, cd):
         st = self.states.get(symbol)
         if not st: return
@@ -72,12 +121,6 @@ class WolfEngine:
                 self._btc_macro_prices.append(c.c)
                 if len(self._btc_macro_prices) > cfg.BTC_MACRO_CANDLES+1:
                     self._btc_macro_prices.pop(0)
-                if len(self._btc_macro_prices) >= cfg.BTC_MACRO_CANDLES:
-                    oldest = self._btc_macro_prices[0]; newest = self._btc_macro_prices[-1]
-                    move = (newest-oldest)/oldest*100
-                    if   move >=  cfg.BTC_MACRO_MIN_MOVE: self.btc_macro_ok=True;  self.btc_macro_dir="UP"
-                    elif move <= -cfg.BTC_MACRO_MIN_MOVE: self.btc_macro_ok=True;  self.btc_macro_dir="DOWN"
-                    else:                                  self.btc_macro_ok=False; self.btc_macro_dir="SIDE"
                 ema_rising = ema5 > self._btc_prev_ema5 if self._btc_prev_ema5 > 0 else True
                 self._btc_prev_ema5 = ema5
                 vel_weak = False
@@ -99,7 +142,7 @@ class WolfEngine:
         if not st.ready: return
         sym_candle = st.candle_count
 
-        # Expire pending on new candle
+        # Expire pending
         if symbol in self._pending and sym_candle > self._pending[symbol]["candle"]:
             self.block_reasons["pending_expired"] = self.block_reasons.get("pending_expired",0)+1
             del self._pending[symbol]
@@ -113,27 +156,32 @@ class WolfEngine:
             else:
                 intra_best = (pos.entry_price - c.l)/pos.entry_price*100
                 cur        = (pos.entry_price - c.c)/pos.entry_price*100
+
             if intra_best > pos.max_pnl: pos.max_pnl = intra_best
             held   = sym_candle - pos.entry_candle
             reason = None
+
             if held >= cfg.STALE_CANDLES and pos.max_pnl < cfg.STALE_PEAK_MIN:
                 reason = "STALE"
             if not reason and cur <= cfg.STOP_LOSS_PCT:
                 reason = "STOP_LOSS"
+
             if not reason:
-                t_act = cfg.TRAILING_ACTIVATE_STRONG if self.btc_momentum else cfg.TRAILING_ACTIVATE_WEAK
-                t_dis = cfg.TRAILING_DISTANCE_STRONG if self.btc_momentum else cfg.TRAILING_DISTANCE_WEAK
+                # Trailing по символу
+                t_act, t_dis = get_trailing_params(pos.symbol)
                 if pos.max_pnl >= t_act:
                     nf = max(pos.max_pnl - t_dis, cfg.TRAILING_FLOOR_MIN)
                     if nf > pos.trailing_floor: pos.trailing_floor = nf
                     if cur <= pos.trailing_floor:
-                        reason = "TRAILING_STRONG" if self.btc_momentum else "TRAILING_WEAK"
+                        reason = f"TRAILING_{pos.symbol[:3]}"
+
             if not reason and held >= cfg.MAX_HOLD_CANDLES:
                 reason = "TIMEOUT"
             if reason: self._close(pos, c.c, held, reason)
+
         self.open = [p for p in self.open if p.status=="OPEN"]
 
-        # ── ENTRY (свечные условия → PENDING) ────────────────────
+        # ── ENTRY ─────────────────────────────────────────────
         if any(p.symbol==symbol for p in self.open): return
         if len(self.open) >= cfg.MAX_SIMULTANEOUS: return
         if symbol in self._pending: return
@@ -145,171 +193,131 @@ class WolfEngine:
         if vol_r < cfg.VOL_MIN: self.block_reasons["vol_low"] += 1;  return
         if vol_r >= cfg.VOL_MAX: self.block_reasons["vol_high"] += 1; return
 
-        if cfg.BTC_MACRO_FILTER and not self.btc_macro_ok:
-            self.block_reasons["macro_side"] = self.block_reasons.get("macro_side",0)+1; return
+        long_ok  = (cfg.DELTA_LONG_MIN  <= delta <= cfg.DELTA_LONG_MAX  and
+                    density >= cfg.DENSITY_LONG_MIN  and st.candle_green)
+        short_ok = (cfg.DELTA_SHORT_MIN <= delta <= cfg.DELTA_SHORT_MAX and
+                    density <= cfg.DENSITY_SHORT_MAX and not st.candle_green)
 
-        long_ok  = (cfg.ENTRY_MODE in ("ALL","LONG_ONLY") and
-                    cfg.DELTA_LONG_MIN <= delta <= cfg.DELTA_LONG_MAX and
-                    density >= cfg.DENSITY_LONG_MIN and st.candle_green and
-                    (not cfg.BTC_MACRO_FILTER or self.btc_macro_dir != "DOWN"))
-        short_ok = (cfg.ENTRY_MODE in ("ALL","SHORT_ONLY") and
-                    cfg.DELTA_SHORT_MIN <= delta <= cfg.DELTA_SHORT_MAX and
-                    density <= cfg.DENSITY_SHORT_MAX and not st.candle_green and
-                    (not cfg.BTC_MACRO_FILTER or self.btc_macro_dir != "UP"))
         if long_ok:    side = "LONG"
         elif short_ok: side = "SHORT"
         else: return
 
-        # Сигнал прошёл свечные фильтры → ставим в PENDING
-        # Ждём orderflow подтверждения
+        # ── СЕССИОННЫЙ + СИМВОЛЬНЫЙ ФИЛЬТР ───────────────────
+        ok, block_reason = self._check_session(side, symbol)
+        if not ok:
+            self.block_reasons[block_reason] = self.block_reasons.get(block_reason,0)+1
+            return
+
+        hour = current_hour_utc()
         self._pending[symbol] = {
             "side": side, "delta": delta, "density": density, "vol_r": vol_r,
             "entry_price": c.c, "candle": sym_candle,
             "btc_regime": self.btc_trend, "ts": time.monotonic(),
-            "flow_ok_since": None,   # когда оба условия (imbalance+velocity) стали True
-            "flow_checks":   0,      # сколько раз подряд оба условия выполнены
+            "flow_ok_since": None, "flow_checks": 0, "hour": hour,
         }
         if cfg.LOG_TO_CONSOLE:
+            t_act, _ = get_trailing_params(symbol)
             print(f"  \033[33m⏳ {side} {symbol} @ {c.c:.4f} "
-                  f"δ={delta:+.0%} ρ={density:.0%} vol={vol_r:.1f}x "
-                  f"BTC={self.btc_trend} → ждём orderflow...\033[0m")
+                  f"δ={delta:+.0%} ρ={density:.0%} "
+                  f"BTC={self.btc_trend} {hour:02d}UTC → flow...\033[0m")
 
-    # ── ORDERBOOK ─────────────────────────────────────────────
-    async def on_orderbook(self, symbol: str, ob_type: str, data: dict) -> None:
-        """Обновляем локальный стакан; если символ в PENDING — проверяем imbalance."""
+    async def on_orderbook(self, symbol: str, ob_type: str, data: dict):
         st = self.states.get(symbol)
         if not st: return
-        if ob_type == "snapshot":
-            st.book.apply_snapshot(data)
-        else:
-            st.book.apply_delta(data)
-        # Проверяем PENDING при каждом обновлении стакана
+        if ob_type == "snapshot": st.book.apply_snapshot(data)
+        else:                     st.book.apply_delta(data)
         if symbol in self._pending and st.book.ready:
             await self._check_flow(symbol)
 
-    # ── TRADE STREAM ─────────────────────────────────────────
     async def on_trade(self, symbol, trade):
         st = self.states.get(symbol)
         if not st: return
         p  = float(trade.get("p", 0))
         if p > 0: st.last_price = p
         s  = trade.get("S",""); sz = float(trade.get("v", 0))
-        if s == "Buy":  st.tick_buy_vol += sz; st.velocity.add_tick(sz,  0.0)
+        if s == "Buy":  st.tick_buy_vol += sz; st.velocity.add_tick(sz, 0.0)
         elif s == "Sell": st.tick_sell_vol += sz; st.velocity.add_tick(0.0, sz)
-        # Проверяем PENDING при каждом тике
         if symbol in self._pending:
             await self._check_flow(symbol)
 
-    # ── FLOW CHECK (persistence logic) ───────────────────────
-    async def _check_flow(self, symbol: str) -> None:
-        """
-        Главный фильтр: проверяем что orderflow ДЕРЖИТСЯ.
-        Условия (оба должны быть True):
-          1. book imbalance согласован со стороной
-          2. tick velocity ускоряется (импульс не затухает)
-        Если оба выполнены FLOW_PERSIST_SEC сек подряд
-        И минимум FLOW_CHECKS_MIN раз → входим.
-        """
+    async def _check_flow(self, symbol: str):
         if symbol not in self._pending: return
         pend = self._pending[symbol]
         st   = self.states.get(symbol)
         if not st: return
         now  = time.monotonic()
 
-        # Таймаут ожидания
         if now - pend["ts"] > cfg.CONFIRM_TIMEOUT_SEC:
             self.block_reasons["flow_timeout"] = self.block_reasons.get("flow_timeout",0)+1
-            if cfg.LOG_TO_CONSOLE:
-                print(f"  \033[31m⌛ SKIP {pend['side']} {symbol} — "
-                      f"orderflow не подтвердил за {cfg.CONFIRM_TIMEOUT_SEC}с\033[0m")
             del self._pending[symbol]; return
 
         side = pend["side"]
-
-        # 1. Book imbalance
         if st.book.ready:
             imbalance = st.book.imbalance
-            if side == "LONG":
-                book_ok = imbalance >= cfg.BOOK_IMBALANCE_MIN
-            else:
-                book_ok = imbalance <= (1.0 / cfg.BOOK_IMBALANCE_MIN)
+            book_ok = (imbalance >= cfg.BOOK_IMBALANCE_MIN if side=="LONG"
+                       else imbalance <= 1.0/cfg.BOOK_IMBALANCE_MIN)
         else:
-            book_ok = True   # стакан ещё не пришёл — не блокируем
+            imbalance = 1.0; book_ok = True
 
-        # 2. Tick velocity
-        vel = st.velocity.velocity
+        vel    = st.velocity.velocity
         vel_ok = vel >= cfg.TICK_VEL_MIN
-
-        # 3. Net delta согласован со стороной (дополнительная проверка)
-        net = st.velocity.current_net_delta()
-        net_ok = (net > 0) if side == "LONG" else (net < 0)
+        net    = st.velocity.current_net_delta()
+        net_ok = (net > 0) if side=="LONG" else (net < 0)
 
         flow_ok = book_ok and vel_ok and net_ok
-
         if flow_ok:
-            if pend["flow_ok_since"] is None:
-                pend["flow_ok_since"] = now
+            if pend["flow_ok_since"] is None: pend["flow_ok_since"] = now
             pend["flow_checks"] += 1
-
             elapsed = now - pend["flow_ok_since"]
             if elapsed >= cfg.FLOW_PERSIST_SEC and pend["flow_checks"] >= cfg.FLOW_CHECKS_MIN:
-                # ✓ Всё сошлось — входим
-                self._enter_confirmed(symbol, pend, imbalance if st.book.ready else 0.0, vel)
+                self._enter_confirmed(symbol, pend, imbalance, vel)
                 del self._pending[symbol]
         else:
-            # Сигнал прервался → сбрасываем persistence
-            if pend["flow_ok_since"] is not None and cfg.LOG_TO_CONSOLE:
-                elapsed = now - pend["flow_ok_since"]
-                print(f"  \033[31m⚡ {side} {symbol} flow прервался "
-                      f"(book={'✓' if book_ok else '✗'} "
-                      f"vel={'✓' if vel_ok else '✗'} "
-                      f"net={'✓' if net_ok else '✗'}) "
-                      f"держался {elapsed:.1f}с\033[0m")
             pend["flow_ok_since"] = None
             pend["flow_checks"]   = 0
 
-    # ── ENTER ────────────────────────────────────────────────
-    def _enter_confirmed(self, symbol: str, pend: dict, imbalance: float, velocity: float) -> None:
+    def _enter_confirmed(self, symbol, pend, imbalance, velocity):
         st = self.states.get(symbol)
         if not st: return
         if any(p.symbol==symbol for p in self.open): return
         if len(self.open) >= cfg.MAX_SIMULTANEOUS: return
         side  = pend["side"]
         price = st.last_price if st.last_price > 0 else pend["entry_price"]
-        sym_candle = pend["candle"]
         self.signals += 1
         if side=="LONG": self.long_count += 1
         else: self.short_count += 1
-        self._last_trade_candle[symbol] = sym_candle
+        self._last_trade_candle[symbol] = pend["candle"]
         self._daily_trades += 1
         pos = Position(
-            symbol=symbol, entry_price=price, entry_candle=sym_candle,
+            symbol=symbol, entry_price=price, entry_candle=pend["candle"],
             entry_density=pend["density"], entry_delta=pend["delta"],
             entry_vol_ratio=pend["vol_r"], side=side,
-            entry_imbalance=round(imbalance,3), entry_velocity=round(velocity,3)
+            entry_imbalance=round(imbalance,3),
+            entry_velocity=round(velocity,3),
+            entry_hour=pend["hour"],
         )
         pos.btc_regime = pend["btc_regime"]
         self.open.append(pos)
+
+        t_act, t_dis = get_trailing_params(symbol)
         with open(cfg.CSV_SIGNALS, "a", newline="") as f:
             csv.writer(f).writerow([
                 int(time.time()*1000), symbol, side, price,
                 round(pend["delta"],4), round(pend["density"],4),
                 round(pend["vol_r"],2), pend["btc_regime"],
-                round(imbalance,3), round(velocity,3)
+                round(imbalance,3), round(velocity,3), pend["hour"]
             ])
         if cfg.LOG_TO_CONSOLE:
             sc = "\033[32m" if side=="LONG" else "\033[31m"
             elapsed = time.monotonic() - pend["ts"]
-            print(f"  {sc}▶ FLOW CONFIRMED {side} {symbol} @ {price:.4f} "
-                  f"δ={pend['delta']:+.0%} imb={imbalance:.2f}x "
-                  f"vel={velocity:.2f}x BTC={pend['btc_regime']} "
-                  f"({elapsed:.1f}с)\033[0m")
+            print(f"  {sc}▶ {side} {symbol} @ {price:.4f} "
+                  f"δ={pend['delta']:+.0%} BTC={pend['btc_regime']} "
+                  f"{pend['hour']:02d}UTC trail_act={t_act}% ({elapsed:.1f}с)\033[0m")
 
-    # ── CLOSE ────────────────────────────────────────────────
     def _close(self, pos, price, held, reason):
         pos.exit_price = price
-        raw  = (price-pos.entry_price)/pos.entry_price*100 if pos.side=="LONG" \
-               else (pos.entry_price-price)/pos.entry_price*100
+        raw  = ((price-pos.entry_price)/pos.entry_price*100 if pos.side=="LONG"
+                else (pos.entry_price-price)/pos.entry_price*100)
         comm = cfg.COMMISSION_PCT * 2
         pos.pnl_pct  = raw - comm
         pos.pnl_usdt = pos.size_usdt * pos.leverage * pos.pnl_pct / 100
@@ -325,29 +333,37 @@ class WolfEngine:
                 pos.leverage, held,
                 round(pos.entry_density,4), round(pos.entry_delta,4),
                 round(pos.entry_vol_ratio,2), round(pos.max_pnl,4),
-                reason, getattr(pos,"btc_regime","UP"),
-                round(pos.entry_imbalance,3), round(pos.entry_velocity,3)
+                reason, pos.btc_regime,
+                round(pos.entry_imbalance,3), round(pos.entry_velocity,3),
+                pos.entry_hour
             ])
         if cfg.LOG_TO_CONSOLE:
             col = "\033[32m" if pos.pnl_usdt>=0 else "\033[31m"
             fee = pos.size_usdt * pos.leverage * comm / 100
             print(f"  {col}◀ {pos.side} {pos.symbol} {pos.pnl_pct:+.3f}% "
                   f"${pos.pnl_usdt:+.2f} (fee:${fee:.2f}) "
-                  f"held={held}×5m peak={pos.max_pnl:.3f}% [{reason}]\033[0m")
+                  f"held={held}×5m peak={pos.max_pnl:.3f}% "
+                  f"[{reason}] {pos.entry_hour:02d}UTC\033[0m")
 
-    # ── RUN.PY HOOKS ─────────────────────────────────────────
     def snapshot(self):
+        hour = current_hour_utc()
         result = []
         for s in cfg.SYMBOLS:
             st = self.states[s]
-            vol = round(st._vols[-1]/st.avg_vol, 1) if st.avg_vol>0 and st._vols else 0
-            imb = round(st.book.imbalance, 2) if st.book.ready else 0.0
-            vel = round(st.velocity.velocity, 2)
+            vol = round(st._vols[-1]/st.avg_vol,1) if st.avg_vol>0 and st._vols else 0
+            imb = round(st.book.imbalance,2) if st.book.ready else 0.0
+            vel = round(min(st.velocity.velocity,50.0),2)
+            # Сессионный статус
+            long_ok,  _ = self._check_session("LONG",  s)
+            short_ok, _ = self._check_session("SHORT", s)
+            if long_ok:    session = "LONG✓"
+            elif short_ok: session = "SHORT✓"
+            else:          session = f"pause({hour:02d}UTC)"
             result.append({
-                "symbol": s, "density": round(st.density,4),
-                "delta": round(st.delta_ratio,4), "price": st.last_price,
-                "vol": vol, "ready": st.ready, "candles": st.candle_count,
-                "imbalance": imb, "velocity": vel
+                "symbol":s, "density":round(st.density,4),
+                "delta":round(st.delta_ratio,4), "price":st.last_price,
+                "vol":vol, "ready":st.ready, "candles":st.candle_count,
+                "imbalance":imb, "velocity":vel, "session":session
             })
         return result
 
@@ -364,7 +380,8 @@ class WolfEngine:
             "daily_trades":self._daily_trades,
             "block_reasons":dict(self.block_reasons),
             "exit_reasons":dict(reasons),
-            "tightened":self._tightened,"loss_streak":self._consecutive_losses
+            "tightened":self._tightened,
+            "loss_streak":self._consecutive_losses
         }
         if not cl: return base
         w = [p for p in cl if p.pnl_usdt > 0]
