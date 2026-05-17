@@ -1,8 +1,8 @@
-"""Wolf Matrix v10 — Session + Symbol Filter Engine"""
+"""Wolf Matrix v11 — Full Pattern Engine"""
 from __future__ import annotations
 import csv, json, os, time
-from dataclasses import dataclass
-from collections import defaultdict
+from dataclasses import dataclass, field
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 import config as cfg
 from indicators import Candle, SymbolState
@@ -11,7 +11,6 @@ def current_hour_utc() -> int:
     return datetime.now(timezone.utc).hour
 
 def get_trailing_params(symbol: str) -> tuple[float, float]:
-    """Trailing параметры по символу из данных щенка."""
     s = symbol.upper()
     if "SUI" in s: return cfg.SUI_TRAILING_ACTIVATE, cfg.SUI_TRAILING_DISTANCE
     if "XRP" in s: return cfg.XRP_TRAILING_ACTIVATE, cfg.XRP_TRAILING_DISTANCE
@@ -29,6 +28,7 @@ class Position:
     trailing_floor: float = -999.0; exit_reason: str = ""
     btc_regime: str = "UP"; entry_imbalance: float = 0.0
     entry_velocity: float = 0.0; entry_hour: int = 0
+    entry_green_count: int = 0; entry_spread: float = 0.0
     def __post_init__(self):
         if not self.size_usdt: self.size_usdt = cfg.POSITION_SIZE_USDT
         if self.leverage == 10: self.leverage = cfg.LEVERAGE
@@ -54,6 +54,17 @@ class WolfEngine:
         self.current_leverage = cfg.LEVERAGE
         self.block_reasons: dict[str, int] = defaultdict(int)
         self._pending: dict[str, dict] = {}
+
+        # ── Консенсус: цвет последней свечи по каждому символу
+        self._last_green: dict[str, bool] = {s: False for s in cfg.SYMBOLS}
+
+        # ── Спред история (для динамического порога)
+        self._spread_history: deque = deque(maxlen=200)
+
+        # ── Средний размер сделки история
+        self._trade_size_history: deque = deque(maxlen=200)
+        self._current_trade_sizes: dict[str, list] = defaultdict(list)
+
         self._init_csv()
 
     def _init_csv(self):
@@ -62,48 +73,75 @@ class WolfEngine:
                 csv.writer(f).writerow([
                     "symbol","side","entry","exit","pnl_pct","pnl_usdt",
                     "leverage","hold_candles","density","delta","vol_ratio",
-                    "max_pnl","exit_reason","btc_regime","imbalance","velocity","hour"
+                    "max_pnl","exit_reason","btc_regime",
+                    "imbalance","velocity","hour","green_count","spread"
                 ])
         if not os.path.exists(cfg.CSV_SIGNALS):
             with open(cfg.CSV_SIGNALS, "w", newline="") as f:
                 csv.writer(f).writerow([
                     "ts","symbol","side","price","delta","density",
-                    "vol_ratio","btc_trend","imbalance","velocity","hour"
+                    "vol_ratio","btc_trend","imbalance","velocity",
+                    "hour","green_count","spread"
                 ])
 
-    def _check_session(self, side: str, symbol: str) -> tuple[bool, str]:
-        """
-        Проверяем сессию и символ.
-        Возвращает (ok, reason_if_blocked).
-        """
-        hour = current_hour_utc()
+    @property
+    def green_count(self) -> int:
+        """Сколько символов сейчас зелёные."""
+        return sum(1 for v in self._last_green.values() if v)
 
-        # BTC=WEAK → пауза
+    def _get_spread(self, symbol: str) -> float:
+        """Текущий спред символа из стакана."""
+        st = self.states.get(symbol)
+        if not st or not st.book.ready: return 0.0
+        if not st.book.bids or not st.book.asks: return 0.0
+        best_bid = max(st.book.bids.keys())
+        best_ask = min(st.book.asks.keys())
+        mid = (best_bid + best_ask) / 2
+        return (best_ask - best_bid) / mid * 100 if mid > 0 else 0.0
+
+    def _spread_is_wide(self, spread: float) -> bool:
+        """Спред выше медианы исторических значений."""
+        if not cfg.SPREAD_FILTER_ENABLED: return True
+        if len(self._spread_history) < 20: return True  # нет данных — не блокируем
+        threshold = sorted(self._spread_history)[len(self._spread_history) * cfg.SPREAD_PERCENTILE // 100]
+        return spread >= threshold
+
+    def _trades_are_whale(self, symbol: str) -> bool:
+        """Средний размер сделки крупнее обычного."""
+        if not cfg.WHALE_FILTER_ENABLED: return True
+        sizes = self._current_trade_sizes.get(symbol, [])
+        if not sizes or not self._trade_size_history or len(self._trade_size_history) < 20:
+            return True  # нет данных — не блокируем
+        avg_now    = sum(sizes) / len(sizes)
+        avg_hist   = sum(self._trade_size_history) / len(self._trade_size_history)
+        return avg_now >= avg_hist * cfg.WHALE_SIZE_MULT
+
+    def _check_session(self, side: str, symbol: str) -> tuple[bool, str]:
+        hour = current_hour_utc()
         if cfg.WEAK_PAUSE and self.btc_trend == "WEAK":
             return False, "btc_weak_pause"
-
         if side == "LONG":
-            # Только при BTC=UP
             if self.btc_trend != "UP":
                 return False, "long_needs_btc_up"
-            # Только разрешённые символы
             if symbol not in cfg.LONG_SYMBOLS:
-                return False, f"long_symbol_blocked_{symbol}"
-            # Только хорошие часы
+                return False, f"long_sym_blocked"
             if hour not in cfg.SESSION_LONG_HOURS:
                 return False, f"long_bad_hour_{hour}utc"
-
         elif side == "SHORT":
-            # Только при BTC=DOWN
             if self.btc_trend != "DOWN":
                 return False, "short_needs_btc_down"
-            # Только разрешённые символы
             if symbol not in cfg.SHORT_SYMBOLS:
-                return False, f"short_symbol_blocked_{symbol}"
-            # Только хорошие часы
+                return False, f"short_sym_blocked"
             if hour not in cfg.SESSION_SHORT_HOURS:
                 return False, f"short_bad_hour_{hour}utc"
+        return True, ""
 
+    def _check_consensus(self, side: str) -> tuple[bool, str]:
+        gc = self.green_count
+        if side == "LONG" and gc < cfg.CONSENSUS_LONG_MIN:
+            return False, f"consensus_long_fail_{gc}green"
+        if side == "SHORT" and gc > cfg.CONSENSUS_SHORT_MAX:
+            return False, f"consensus_short_fail_{gc}green"
         return True, ""
 
     async def on_candle(self, symbol, cd):
@@ -118,9 +156,6 @@ class WolfEngine:
                 self.btc_up = ema5 > ema15
                 self._btc_prices.append(c.c)
                 if len(self._btc_prices) > 7: self._btc_prices.pop(0)
-                self._btc_macro_prices.append(c.c)
-                if len(self._btc_macro_prices) > cfg.BTC_MACRO_CANDLES+1:
-                    self._btc_macro_prices.pop(0)
                 ema_rising = ema5 > self._btc_prev_ema5 if self._btc_prev_ema5 > 0 else True
                 self._btc_prev_ema5 = ema5
                 vel_weak = False
@@ -136,6 +171,16 @@ class WolfEngine:
                 else:
                     self.btc_trend="DOWN"; self.btc_momentum=False
             return
+
+        # Обновляем цвет свечи для консенсуса
+        if symbol in cfg.SYMBOLS:
+            self._last_green[symbol] = c.c > c.o
+
+        # Обновляем историю размера сделок
+        sizes = self._current_trade_sizes.pop(symbol, [])
+        if sizes:
+            avg_size = sum(sizes) / len(sizes)
+            self._trade_size_history.append(avg_size)
 
         st.on_candle(c, self.btc_up)
         self.tick += 1
@@ -156,29 +201,22 @@ class WolfEngine:
             else:
                 intra_best = (pos.entry_price - c.l)/pos.entry_price*100
                 cur        = (pos.entry_price - c.c)/pos.entry_price*100
-
             if intra_best > pos.max_pnl: pos.max_pnl = intra_best
-            held   = sym_candle - pos.entry_candle
-            reason = None
-
+            held = sym_candle - pos.entry_candle; reason = None
             if held >= cfg.STALE_CANDLES and pos.max_pnl < cfg.STALE_PEAK_MIN:
                 reason = "STALE"
             if not reason and cur <= cfg.STOP_LOSS_PCT:
                 reason = "STOP_LOSS"
-
             if not reason:
-                # Trailing по символу
                 t_act, t_dis = get_trailing_params(pos.symbol)
                 if pos.max_pnl >= t_act:
                     nf = max(pos.max_pnl - t_dis, cfg.TRAILING_FLOOR_MIN)
                     if nf > pos.trailing_floor: pos.trailing_floor = nf
                     if cur <= pos.trailing_floor:
                         reason = f"TRAILING_{pos.symbol[:3]}"
-
             if not reason and held >= cfg.MAX_HOLD_CANDLES:
                 reason = "TIMEOUT"
             if reason: self._close(pos, c.c, held, reason)
-
         self.open = [p for p in self.open if p.status=="OPEN"]
 
         # ── ENTRY ─────────────────────────────────────────────
@@ -193,8 +231,8 @@ class WolfEngine:
         if vol_r < cfg.VOL_MIN: self.block_reasons["vol_low"] += 1;  return
         if vol_r >= cfg.VOL_MAX: self.block_reasons["vol_high"] += 1; return
 
-        long_ok  = (cfg.DELTA_LONG_MIN  <= delta <= cfg.DELTA_LONG_MAX  and
-                    density >= cfg.DENSITY_LONG_MIN  and st.candle_green)
+        long_ok  = (cfg.DELTA_LONG_MIN  <= delta <= cfg.DELTA_LONG_MAX and
+                    density >= cfg.DENSITY_LONG_MIN and st.candle_green)
         short_ok = (cfg.DELTA_SHORT_MIN <= delta <= cfg.DELTA_SHORT_MAX and
                     density <= cfg.DENSITY_SHORT_MAX and not st.candle_green)
 
@@ -202,24 +240,40 @@ class WolfEngine:
         elif short_ok: side = "SHORT"
         else: return
 
-        # ── СЕССИОННЫЙ + СИМВОЛЬНЫЙ ФИЛЬТР ───────────────────
-        ok, block_reason = self._check_session(side, symbol)
+        # ── ФИЛЬТР 1: СЕССИЯ + СИМВОЛ ────────────────────────
+        ok, reason = self._check_session(side, symbol)
         if not ok:
-            self.block_reasons[block_reason] = self.block_reasons.get(block_reason,0)+1
-            return
+            self.block_reasons[reason] = self.block_reasons.get(reason,0)+1; return
+
+        # ── ФИЛЬТР 2: КОНСЕНСУС МОНЕТ ─────────────────────────
+        ok, reason = self._check_consensus(side)
+        if not ok:
+            self.block_reasons[reason] = self.block_reasons.get(reason,0)+1; return
+
+        # ── ФИЛЬТР 3: СПРЕД ───────────────────────────────────
+        spread = self._get_spread(symbol)
+        if spread > 0: self._spread_history.append(spread)
+        if not self._spread_is_wide(spread):
+            self.block_reasons["spread_narrow"] = self.block_reasons.get("spread_narrow",0)+1; return
+
+        # ── ФИЛЬТР 4: КИТЫ ────────────────────────────────────
+        if not self._trades_are_whale(symbol):
+            self.block_reasons["whale_fail"] = self.block_reasons.get("whale_fail",0)+1; return
 
         hour = current_hour_utc()
+        gc   = self.green_count
         self._pending[symbol] = {
             "side": side, "delta": delta, "density": density, "vol_r": vol_r,
             "entry_price": c.c, "candle": sym_candle,
             "btc_regime": self.btc_trend, "ts": time.monotonic(),
-            "flow_ok_since": None, "flow_checks": 0, "hour": hour,
+            "flow_ok_since": None, "flow_checks": 0,
+            "hour": hour, "green_count": gc, "spread": round(spread, 5),
         }
         if cfg.LOG_TO_CONSOLE:
-            t_act, _ = get_trailing_params(symbol)
             print(f"  \033[33m⏳ {side} {symbol} @ {c.c:.4f} "
                   f"δ={delta:+.0%} ρ={density:.0%} "
-                  f"BTC={self.btc_trend} {hour:02d}UTC → flow...\033[0m")
+                  f"BTC={self.btc_trend} {hour:02d}UTC "
+                  f"green={gc}/4 spr={spread:.4f}% → flow...\033[0m")
 
     async def on_orderbook(self, symbol: str, ob_type: str, data: dict):
         st = self.states.get(symbol)
@@ -237,20 +291,18 @@ class WolfEngine:
         s  = trade.get("S",""); sz = float(trade.get("v", 0))
         if s == "Buy":  st.tick_buy_vol += sz; st.velocity.add_tick(sz, 0.0)
         elif s == "Sell": st.tick_sell_vol += sz; st.velocity.add_tick(0.0, sz)
+        if sz > 0: self._current_trade_sizes[symbol].append(sz)
         if symbol in self._pending:
             await self._check_flow(symbol)
 
     async def _check_flow(self, symbol: str):
         if symbol not in self._pending: return
-        pend = self._pending[symbol]
-        st   = self.states.get(symbol)
+        pend = self._pending[symbol]; st = self.states.get(symbol)
         if not st: return
-        now  = time.monotonic()
-
+        now = time.monotonic()
         if now - pend["ts"] > cfg.CONFIRM_TIMEOUT_SEC:
             self.block_reasons["flow_timeout"] = self.block_reasons.get("flow_timeout",0)+1
             del self._pending[symbol]; return
-
         side = pend["side"]
         if st.book.ready:
             imbalance = st.book.imbalance
@@ -258,23 +310,19 @@ class WolfEngine:
                        else imbalance <= 1.0/cfg.BOOK_IMBALANCE_MIN)
         else:
             imbalance = 1.0; book_ok = True
-
-        vel    = st.velocity.velocity
-        vel_ok = vel >= cfg.TICK_VEL_MIN
-        net    = st.velocity.current_net_delta()
+        vel = st.velocity.velocity; vel_ok = vel >= cfg.TICK_VEL_MIN
+        net = st.velocity.current_net_delta()
         net_ok = (net > 0) if side=="LONG" else (net < 0)
-
         flow_ok = book_ok and vel_ok and net_ok
         if flow_ok:
             if pend["flow_ok_since"] is None: pend["flow_ok_since"] = now
             pend["flow_checks"] += 1
-            elapsed = now - pend["flow_ok_since"]
-            if elapsed >= cfg.FLOW_PERSIST_SEC and pend["flow_checks"] >= cfg.FLOW_CHECKS_MIN:
+            if (now - pend["flow_ok_since"] >= cfg.FLOW_PERSIST_SEC and
+                    pend["flow_checks"] >= cfg.FLOW_CHECKS_MIN):
                 self._enter_confirmed(symbol, pend, imbalance, vel)
                 del self._pending[symbol]
         else:
-            pend["flow_ok_since"] = None
-            pend["flow_checks"]   = 0
+            pend["flow_ok_since"] = None; pend["flow_checks"] = 0
 
     def _enter_confirmed(self, symbol, pend, imbalance, velocity):
         st = self.states.get(symbol)
@@ -295,24 +343,28 @@ class WolfEngine:
             entry_imbalance=round(imbalance,3),
             entry_velocity=round(velocity,3),
             entry_hour=pend["hour"],
+            entry_green_count=pend["green_count"],
+            entry_spread=pend["spread"],
         )
         pos.btc_regime = pend["btc_regime"]
         self.open.append(pos)
-
         t_act, t_dis = get_trailing_params(symbol)
         with open(cfg.CSV_SIGNALS, "a", newline="") as f:
             csv.writer(f).writerow([
                 int(time.time()*1000), symbol, side, price,
                 round(pend["delta"],4), round(pend["density"],4),
                 round(pend["vol_r"],2), pend["btc_regime"],
-                round(imbalance,3), round(velocity,3), pend["hour"]
+                round(imbalance,3), round(velocity,3),
+                pend["hour"], pend["green_count"], pend["spread"]
             ])
         if cfg.LOG_TO_CONSOLE:
             sc = "\033[32m" if side=="LONG" else "\033[31m"
             elapsed = time.monotonic() - pend["ts"]
             print(f"  {sc}▶ {side} {symbol} @ {price:.4f} "
                   f"δ={pend['delta']:+.0%} BTC={pend['btc_regime']} "
-                  f"{pend['hour']:02d}UTC trail_act={t_act}% ({elapsed:.1f}с)\033[0m")
+                  f"{pend['hour']:02d}UTC green={pend['green_count']}/4 "
+                  f"spr={pend['spread']:.4f}% "
+                  f"trail={t_act}% ({elapsed:.1f}с)\033[0m")
 
     def _close(self, pos, price, held, reason):
         pos.exit_price = price
@@ -335,7 +387,7 @@ class WolfEngine:
                 round(pos.entry_vol_ratio,2), round(pos.max_pnl,4),
                 reason, pos.btc_regime,
                 round(pos.entry_imbalance,3), round(pos.entry_velocity,3),
-                pos.entry_hour
+                pos.entry_hour, pos.entry_green_count, pos.entry_spread
             ])
         if cfg.LOG_TO_CONSOLE:
             col = "\033[32m" if pos.pnl_usdt>=0 else "\033[31m"
@@ -343,27 +395,29 @@ class WolfEngine:
             print(f"  {col}◀ {pos.side} {pos.symbol} {pos.pnl_pct:+.3f}% "
                   f"${pos.pnl_usdt:+.2f} (fee:${fee:.2f}) "
                   f"held={held}×5m peak={pos.max_pnl:.3f}% "
-                  f"[{reason}] {pos.entry_hour:02d}UTC\033[0m")
+                  f"[{reason}] {pos.entry_hour:02d}UTC "
+                  f"green={pos.entry_green_count}/4\033[0m")
 
     def snapshot(self):
-        hour = current_hour_utc()
+        hour = current_hour_utc(); gc = self.green_count
         result = []
         for s in cfg.SYMBOLS:
             st = self.states[s]
             vol = round(st._vols[-1]/st.avg_vol,1) if st.avg_vol>0 and st._vols else 0
             imb = round(st.book.imbalance,2) if st.book.ready else 0.0
             vel = round(min(st.velocity.velocity,50.0),2)
-            # Сессионный статус
+            spd = round(self._get_spread(s),4)
             long_ok,  _ = self._check_session("LONG",  s)
             short_ok, _ = self._check_session("SHORT", s)
-            if long_ok:    session = "LONG✓"
-            elif short_ok: session = "SHORT✓"
-            else:          session = f"pause({hour:02d}UTC)"
+            if long_ok:    session = f"LONG✓ g={gc}/4"
+            elif short_ok: session = f"SHORT✓ g={gc}/4"
+            else:          session = f"pause {hour:02d}UTC g={gc}/4"
             result.append({
                 "symbol":s, "density":round(st.density,4),
                 "delta":round(st.delta_ratio,4), "price":st.last_price,
                 "vol":vol, "ready":st.ready, "candles":st.candle_count,
-                "imbalance":imb, "velocity":vel, "session":session
+                "imbalance":imb, "velocity":vel,
+                "spread":spd, "session":session
             })
         return result
 

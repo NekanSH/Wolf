@@ -1,30 +1,38 @@
 """
-Wolf Matrix v10 — Session + Symbol Filter
-══════════════════════════════════════════
+Wolf Matrix v11 — Full Pattern Engine
+══════════════════════════════════════
 
-НОВОЕ В v10 (на основе 4300+ свечей щенка):
+ПАТТЕРНЫ ИЗ 5220 СВЕЧЕЙ ЩЕНКА (4.5 дня, p=0.00000000):
 
-  ФИЛЬТР 1 — BTC РЕЖИМ определяет направление:
-    BTC=UP   → только LONG,  символы: XRP + SOL
-    BTC=DOWN → только SHORT, символы: SUI + XRP
-    BTC=WEAK → не торгуем вообще
+  1. СЕССИИ (p=0.00000000, 7 файлов подряд):
+     SHORT: 9-15 UTC → avg -0.307% за свечу
+     LONG:  16-18 UTC → avg +0.174% за свечу
 
-  ФИЛЬТР 2 — ТОРГОВЫЕ СЕССИИ (p=0.0000, 5 файлов подряд):
-    BTC=DOWN + SHORT → лучшие часы 9-15 UTC (Лондон + NY открытие)
-    BTC=UP   + LONG  → лучшие часы 0,1,8,16,17,18 UTC (Азия + NY середина)
+  2. СИМВОЛЫ (по данным щенка):
+     SHORT лидер: SUI (92% дают 0.25%+, avg -0.547%)
+     LONG лидер:  XRP (+0.097% avg в 16-18 UTC)
 
-  ФИЛЬТР 3 — TRAILING ПО СИМВОЛУ:
-    SUI → быстрый выход (activate=0.20, distance=0.03) — выстреливает и возвращается
-    XRP → медленный выход (activate=0.25, distance=0.04) — идёт плавно
-    SOL → стандартный
+  3. КОНСЕНСУС МОНЕТ:
+     LONG:  green_count >= 3 из 4 (+0.010% vs -0.067%)
+     SHORT: green_count <= 1 из 4
 
-МАТЕМАТИКА ($1 net):
+  4. СПРЕД (широкий = движение идёт):
+     Широкий спред: 025=64% vs узкий 35%
+
+  5. РАЗМЕР СДЕЛОК (киты двигают):
+     Киты: 025=67% vs планктон 43%
+
+  6. TRAILING ПО СИМВОЛУ:
+     SUI: быстрый (выстреливает и возвращается)
+     XRP: медленный (идёт плавно)
+
+МАТЕМАТИКА ($1 net гарантия):
   Нотионал = 100 × 10 = 1000 USDT
   Комиссия = 0.055% × 2 = $1.10
   Floor min = 0.21% → net $1.00
 """
 
-SYMBOLS = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "SUIUSDT"]
+SYMBOLS    = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "SUIUSDT"]
 BTC_SYMBOL = "BTCUSDT"
 
 KLINE_INTERVAL   = "5"
@@ -40,44 +48,45 @@ MOMENTUM_LOOKBACK = 5; HIGH_LOW_LOOKBACK = 20
 DELTA_VOLUME_MIN_MULT = 1.0
 BTC_TREND_WEIGHT = True
 
-# ─── ENTRY (свечные условия) ──────────────────────────────────
+# ─── СВЕЧНЫЕ УСЛОВИЯ ВХОДА ────────────────────────────────────
 DELTA_LONG_MIN   = 0.65;  DELTA_LONG_MAX  = 0.90
 DELTA_SHORT_MIN  = -0.90; DELTA_SHORT_MAX = -0.65
 VOL_MIN = 0.5;            VOL_MAX = 8.0
 DENSITY_LONG_MIN  = 0.70
 DENSITY_SHORT_MAX = 0.30
 
-# ─── СЕССИОННЫЙ ФИЛЬТР (из данных щенка) ─────────────────────
-# BTC=DOWN + SHORT: лучшие часы UTC
+# ─── 1. СЕССИОННЫЙ ФИЛЬТР ─────────────────────────────────────
 SESSION_SHORT_HOURS = [9, 10, 11, 13, 14, 15]
+SESSION_LONG_HOURS  = [16, 17, 18, 0, 1, 8]
 
-# BTC=UP + LONG: лучшие часы UTC
-SESSION_LONG_HOURS  = [0, 1, 8, 16, 17, 18]
+# ─── 2. СИМВОЛЬНЫЙ ФИЛЬТР ─────────────────────────────────────
+LONG_SYMBOLS  = ["XRPUSDT", "SOLUSDT"]  # XRP лидер, SOL запасной
+SHORT_SYMBOLS = ["SUIUSDT", "XRPUSDT"]  # SUI лидер (92%), XRP запасной
+WEAK_PAUSE    = True  # BTC=WEAK → не торгуем
 
-# ─── СИМВОЛЬНЫЙ ФИЛЬТР (из данных щенка) ─────────────────────
-# BTC=UP → лонг только этими символами
-LONG_SYMBOLS  = ["XRPUSDT", "SOLUSDT"]
+# ─── 3. КОНСЕНСУС МОНЕТ ───────────────────────────────────────
+# Сколько из 4 монет должны быть зелёными
+CONSENSUS_LONG_MIN  = 3   # для лонга: ≥ 3 зелёных
+CONSENSUS_SHORT_MAX = 1   # для шорта: ≤ 1 зелёных
 
-# BTC=DOWN → шорт только этими символами
-SHORT_SYMBOLS = ["SUIUSDT", "XRPUSDT"]
+# ─── 4. СПРЕД ФИЛЬТР ─────────────────────────────────────────
+# Широкий спред = рынок готовится к движению
+# Порог: топ 33% спредов (динамически от текущего стакана)
+SPREAD_FILTER_ENABLED = True
+SPREAD_PERCENTILE     = 50   # входим только если спред выше медианы
 
-# BTC=WEAK → не торгуем (пауза)
-WEAK_PAUSE = True
+# ─── 5. РАЗМЕР СДЕЛОК (КИТ ФИЛЬТР) ───────────────────────────
+# Крупные сделки = киты = реальное движение
+WHALE_FILTER_ENABLED  = True
+WHALE_SIZE_MULT       = 1.3  # средний размер сделки > 1.3x от медианы
 
-# ─── TRAILING ПО СИМВОЛУ ─────────────────────────────────────
-# SUI — быстрый: выстреливает и сразу возвращается
-SUI_TRAILING_ACTIVATE = 0.20   # ниже порога чтобы успеть поймать
-SUI_TRAILING_DISTANCE = 0.03   # быстро фиксируем
-
-# XRP — медленный: идёт плавно
-XRP_TRAILING_ACTIVATE = 0.25
+# ─── 6. TRAILING ПО СИМВОЛУ ───────────────────────────────────
+SUI_TRAILING_ACTIVATE = 0.20   # быстрый — выстреливает и возвращается
+SUI_TRAILING_DISTANCE = 0.03
+XRP_TRAILING_ACTIVATE = 0.25   # медленный — идёт плавно
 XRP_TRAILING_DISTANCE = 0.04
-
-# SOL — стандартный
 SOL_TRAILING_ACTIVATE = 0.25
 SOL_TRAILING_DISTANCE = 0.04
-
-# ETH — стандартный (для шорта если вдруг)
 ETH_TRAILING_ACTIVATE = 0.25
 ETH_TRAILING_DISTANCE = 0.04
 
@@ -86,19 +95,19 @@ TRAILING_ACTIVATE_STRONG = 0.25
 TRAILING_DISTANCE_STRONG = 0.04
 TRAILING_ACTIVATE_WEAK   = 0.25
 TRAILING_DISTANCE_WEAK   = 0.04
-TRAILING_FLOOR_MIN       = 0.21    # floor никогда ниже → $1.00 net
+TRAILING_FLOOR_MIN       = 0.21   # floor → $1.00 net минимум
 
 # ─── STOP LOSS ────────────────────────────────────────────────
-STOP_LOSS_PCT = -99.0
+STOP_LOSS_PCT = -99.0   # отключён
 
 # ─── COMMISSIONS ─────────────────────────────────────────────
-COMMISSION_PCT = 0.055
+COMMISSION_PCT = 0.055  # per side
 
 # ─── TRADING ─────────────────────────────────────────────────
 LEVERAGE           = 10
 SHADOW_MODE        = True
 POSITION_SIZE_USDT = 100.0
-MAX_SIMULTANEOUS   = 4     # было 6 — меньше символов = меньше одновременных
+MAX_SIMULTANEOUS   = 4
 MAX_HOLD_CANDLES   = 5
 COOLDOWN_CANDLES   = 2
 
@@ -123,8 +132,8 @@ BTC_MACRO_MIN_MOVE  = 0.5
 BTC_MACRO_FILTER    = False
 
 # ─── LOGS ────────────────────────────────────────────────────
-CSV_SIGNALS     = "wolf_signals.csv"
-CSV_TRADES      = "wolf_trades.csv"
-STATE_FILE      = "wolf_state.json"
-LOG_TO_CONSOLE  = True
-CONSOLE_TOP_N   = 4
+CSV_SIGNALS    = "wolf_signals.csv"
+CSV_TRADES     = "wolf_trades.csv"
+STATE_FILE     = "wolf_state.json"
+LOG_TO_CONSOLE = True
+CONSOLE_TOP_N  = 4
