@@ -18,8 +18,8 @@ def banner(mode):
 ║  Collects data in ALL market regimes               ║
 ╚═══════════════════════════════════════════════════╝{RST}
   {mode} │ {len(cfg.SYMBOLS)} symbols │ {cfg.KLINE_INTERVAL}min │ {Y}{cfg.LEVERAGE}x{RST} ${e:.0f}
-  LONG:  δ {cfg.DELTA_LONG_MIN:.0%}-{cfg.DELTA_LONG_MAX:.0%} + green + ρ≥{cfg.DENSITY_LONG_MIN:.0%}
-  SHORT: δ {cfg.DELTA_SHORT_MIN:.0%}-{cfg.DELTA_SHORT_MAX:.0%} + red + ρ≤{cfg.DENSITY_SHORT_MAX:.0%}
+  LONG:  символы {cfg.LONG_SYMBOLS} | часы {cfg.SESSION_LONG_HOURS}
+  SHORT: δ {cfg.DELTA_SHORT_MIN:.0%}-{-0.65:.0%} + red + ρ≤{0.30:.0%}
   Vol:   {cfg.VOL_MIN}-{cfg.VOL_MAX}x │ SL:{cfg.STOP_LOSS_PCT}% │ TP STRONG@{cfg.TRAILING_ACTIVATE_STRONG}% WEAK@{cfg.TRAILING_ACTIVATE_WEAK}%
   Exit:  BTC_REVERSAL | STOP_LOSS | TRAILING_TP | TIMEOUT {cfg.MAX_HOLD_CANDLES}×{cfg.KLINE_INTERVAL}min
   Warmup: {cfg.WARMUP_CANDLES}×{cfg.KLINE_INTERVAL}min
@@ -71,22 +71,16 @@ def render(eng: WolfEngine):
             s = it["symbol"].replace("USDT","")
             d = it["delta"]; dens = it["density"]
             # Delta coloring
-            if d >= cfg.DELTA_LONG_MIN: dc = f"{G}{d:>+5.0%}{RST}"
-            elif d <= cfg.DELTA_SHORT_MAX: dc = f"{R}{d:>+5.0%}{RST}"
-            else: dc = f"{D}{d:>+5.0%}{RST}"
-
-            if dens >= cfg.DENSITY_LONG_MIN: db = f"{G}{dens:>4.0%}{RST}"
-            elif dens <= cfg.DENSITY_SHORT_MAX: db = f"{R}{dens:>4.0%}{RST}"
-            else: db = f"{D}{dens:>4.0%}{RST}"
+            dc = f"{G}{d:>+5.0%}{RST}" if d > 0 else (f"{R}{d:>+5.0%}{RST}" if d < 0 else f"{D}{d:>+5.0%}{RST}")
+            db = f"{G}{dens:>4.0%}{RST}" if dens >= 0.5 else f"{D}{dens:>4.0%}{RST}"
 
             v = it["vol"]
             vc = f"{Y}{v:>4.1f}x{RST}" if v >= 1.0 else f"{D}{v:>4.1f}x{RST}"
 
             sig = ""
-            if d >= cfg.DELTA_LONG_MIN and dens >= cfg.DENSITY_LONG_MIN:
-                sig = f"{G}◄ LONG{RST}"
-            elif d <= cfg.DELTA_SHORT_MAX and dens <= cfg.DENSITY_SHORT_MAX:
-                sig = f"{R}◄ SHORT{RST}"
+            side, _ = eng._check_entry(it["symbol"]+"USDT" if "USDT" not in it["symbol"] else it["symbol"])
+            if side == "LONG":   sig = f"{G}◄ LONG{RST}"
+            elif side == "SHORT": sig = f"{R}◄ SHORT{RST}"
 
             for pos in eng.open:
                 if pos.symbol == it["symbol"]:
