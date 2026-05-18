@@ -19,7 +19,7 @@ def banner(mode):
 ╚═══════════════════════════════════════════════════╝{RST}
   {mode} │ {len(cfg.SYMBOLS)} symbols │ {cfg.KLINE_INTERVAL}min │ {Y}{cfg.LEVERAGE}x{RST} ${e:.0f}
   LONG:  символы {cfg.LONG_SYMBOLS} | часы {cfg.SESSION_LONG_HOURS}
-  SHORT: δ {cfg.DELTA_SHORT_MIN:.0%}-{-0.65:.0%} + red + ρ≤{0.30:.0%}
+  SHORT: {cfg.SHORT_SYMBOLS} | часы {cfg.SESSION_SHORT_HOURS} | BTC=DOWN
   Vol:   {cfg.VOL_MIN}-{cfg.VOL_MAX}x │ SL:{cfg.STOP_LOSS_PCT}% │ TP STRONG@{cfg.TRAILING_ACTIVATE_STRONG}% WEAK@{cfg.TRAILING_ACTIVATE_WEAK}%
   Exit:  BTC_REVERSAL | STOP_LOSS | TRAILING_TP | TIMEOUT {cfg.MAX_HOLD_CANDLES}×{cfg.KLINE_INTERVAL}min
   Warmup: {cfg.WARMUP_CANDLES}×{cfg.KLINE_INTERVAL}min
