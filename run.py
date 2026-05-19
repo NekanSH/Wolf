@@ -20,8 +20,8 @@ def banner(mode):
   {mode} │ {len(cfg.SYMBOLS)} symbols │ {cfg.KLINE_INTERVAL}min │ {Y}{cfg.LEVERAGE}x{RST} ${e:.0f}
   LONG:  символы {cfg.LONG_SYMBOLS} | часы {cfg.SESSION_LONG_HOURS}
   SHORT: {cfg.SHORT_SYMBOLS} | часы {cfg.SESSION_SHORT_HOURS} | BTC=DOWN
-  Vol:   {cfg.VOL_MIN}-{cfg.VOL_MAX}x │ SL:{cfg.STOP_LOSS_PCT}% │ TP STRONG@{cfg.TRAILING_ACTIVATE_STRONG}% WEAK@{cfg.TRAILING_ACTIVATE_WEAK}%
-  Exit:  BTC_REVERSAL | STOP_LOSS | TRAILING_TP | TIMEOUT {cfg.MAX_HOLD_CANDLES}×{cfg.KLINE_INTERVAL}min
+  Vol:   {cfg.VOL_MIN}-{cfg.VOL_MAX}x │ SL:{cfg.STOP_LOSS_PCT}% │ SUI trail@{cfg.SUI_TRAILING_ACTIVATE}% XRP@{cfg.XRP_TRAILING_ACTIVATE}%
+  Exit:  STALE | TRAILING | TIMEOUT {cfg.MAX_HOLD_CANDLES}×{cfg.KLINE_INTERVAL}min
   Warmup: {cfg.WARMUP_CANDLES}×{cfg.KLINE_INTERVAL}min
 """)
 
@@ -92,8 +92,8 @@ def render(eng: WolfEngine):
                     sig = f"{c}[{pos.side} {pnl:+.2f}%]{RST}"
 
             imb = it.get('imbalance', 0); vel = it.get('velocity', 1.0)
-            ic = f"{G}{imb:>4.2f}x{RST}" if imb >= cfg.BOOK_IMBALANCE_MIN else f"{D}{imb:>4.2f}x{RST}"
-            vc2 = f"{Y}{vel:>4.2f}v{RST}" if vel >= cfg.TICK_VEL_MIN else f"{D}{vel:>4.2f}v{RST}"
+            ic = f"{G}{imb:>4.2f}x{RST}" if imb >= 1.2 else f"{D}{imb:>4.2f}x{RST}"
+            vc2 = f"{Y}{vel:>4.2f}v{RST}" if vel >= 1.0 else f"{D}{vel:>4.2f}v{RST}"
             print(f"  {s:<8} {dc} {db} {vc}  {it['price']:>10.4f}  {ic} {vc2}  {sig}")
 
     if warm:
