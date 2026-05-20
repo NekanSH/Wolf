@@ -92,7 +92,7 @@ class OrderBook:
         bid_vol = sum(self.bids[p] for p in top_bids)
         ask_vol = sum(self.asks[p] for p in top_asks)
         if ask_vol == 0: return 2.0
-        return bid_vol / ask_vol
+        return min(bid_vol / ask_vol, 10.0)  # cap: защита от пустого стакана
 
     @property
     def mid_price(self) -> float:
