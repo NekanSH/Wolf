@@ -186,8 +186,8 @@ class SymbolState:
         self.tick_sell_vol = 0.0
 
         # ── Orderflow (новое) ──
-        self.book     = OrderBook(depth=cfg.BOOK_DEPTH)
-        self.velocity = TickVelocityTracker(window_sec=cfg.TICK_VEL_WINDOW)
+        self.book     = OrderBook(depth=5)
+        self.velocity = TickVelocityTracker(window_sec=5.0)
 
         # ── Результаты ──
         self.density      = 0.0
