@@ -1,27 +1,32 @@
 """
-Wolf Matrix v13 — Simple Session Engine
-════════════════════════════════════════
+Wolf Matrix v14 — Session + Quality Filter
+═══════════════════════════════════════════
 
-АРХИТЕКТУРА УПРОЩЕНА (18.05.2026):
+ИЗМЕНЕНИЯ v14 (на основе 11256 свечей щенка):
 
-  БЫЛО: delta + density + orderflow + консенсус + час + символ
-  СТАЛО: час + BTC + символ + vol_ratio
+  1. BODY_RATIO_MIN = 0.30
+     Свеча должна иметь реальное тело.
+     Хвосты без тела = STALE. Убирает ~30% мёртвых входов.
 
-  ПОЧЕМУ: delta/density пропускали только трупы движений.
-  Щенок доказал (7044 свечи): в правильный час движение
-  происходит в 68-92% случаев БЕЗ фильтра delta/density.
+  2. Цвет свечи совпадает со стороной:
+     SHORT → только красная свеча
+     LONG  → только зелёная свеча
 
-  ВХОД: первая свеча с vol_ratio>0.5 в правильном окне.
-  ВЫХОД: trailing по символу (SUI быстрый, XRP медленный).
+  3. SHORT_SYMBOLS добавлен SOL
+     SOL: 74% reached_025, dn=0.339% — лучше XRP в шорт
 
-СТАТИСТИКА (7044 свечи, 6.1 дней):
-  Шорт (DOWN+час+SUI/XRP): 68% reached_025, dn=0.375%
-  Лонг (UP+час+XRP/SOL):   43% reached_025, up=0.188%
-  Ожидаемых сделок: ~5-8 в день
+  4. VOL_MIN = 1.0 (было 0.5)
+     Только свечи с объёмом выше среднего
+
+МАТЕМАТИКА ($1 net):
+  Нотионал = 100 × 10 = 1000 USDT
+  Комиссия = 0.055% × 2 = $1.10
+  Floor min = 0.21% → net $1.00
 """
 
 SYMBOLS    = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "SUIUSDT"]
 BTC_SYMBOL = "BTCUSDT"
+BOOK_DEPTH = 5
 
 KLINE_INTERVAL   = "5"
 WARMUP_CANDLES   = 12
@@ -36,12 +41,11 @@ MOMENTUM_LOOKBACK = 5; HIGH_LOW_LOOKBACK = 20
 DELTA_VOLUME_MIN_MULT = 1.0
 BTC_TREND_WEIGHT = True
 
-# ─── ВХОД (упрощённый) ───────────────────────────────────────
-# Убраны: DELTA, DENSITY, ORDERFLOW, CONSENSUS
-# Оставлено: ЧАС + BTC + СИМВОЛ + ОБЪЁМ
+# ─── ВХОД ────────────────────────────────────────────────────
+VOL_MIN  = 1.0    # объём выше среднего
+VOL_MAX  = 10.0
 
-VOL_MIN = 0.5    # минимальный объём (не мёртвая свеча)
-VOL_MAX = 10.0   # защита от аномальных всплесков
+BODY_RATIO_MIN = 0.30  # тело свечи ≥ 30% диапазона
 
 # ─── СЕССИОННЫЙ ФИЛЬТР ───────────────────────────────────────
 SESSION_SHORT_HOURS = [13, 14, 15]
@@ -49,14 +53,8 @@ SESSION_LONG_HOURS  = [16, 17]
 
 # ─── СИМВОЛЬНЫЙ ФИЛЬТР ───────────────────────────────────────
 LONG_SYMBOLS  = ["XRPUSDT", "SOLUSDT"]
-SHORT_SYMBOLS = ["SUIUSDT", "XRPUSDT"]
-WEAK_PAUSE    = True  # BTC=WEAK → не торгуем
-
-
-# ─── ДЛЯ INDICATORS.PY (OrderBook + TickVelocity) ────────────
-BOOK_DEPTH      = 5
-TICK_VEL_WINDOW = 5.0
-DENSITY_HISTORY = 5
+SHORT_SYMBOLS = ["SUIUSDT", "SOLUSDT", "XRPUSDT"]  # SOL добавлен
+WEAK_PAUSE    = True
 
 # ─── TRAILING ПО СИМВОЛУ ─────────────────────────────────────
 SUI_TRAILING_ACTIVATE = 0.20
@@ -67,21 +65,21 @@ SOL_TRAILING_ACTIVATE = 0.25
 SOL_TRAILING_DISTANCE = 0.04
 ETH_TRAILING_ACTIVATE = 0.25
 ETH_TRAILING_DISTANCE = 0.04
-TRAILING_FLOOR_MIN    = 0.21  # floor → $1.00 net минимум
+TRAILING_FLOOR_MIN    = 0.21
 
 # ─── STOP LOSS ────────────────────────────────────────────────
-STOP_LOSS_PCT = -99.0  # отключён
+STOP_LOSS_PCT = -99.0
 
 # ─── COMMISSIONS ─────────────────────────────────────────────
-COMMISSION_PCT = 0.055  # per side
+COMMISSION_PCT = 0.055
 
 # ─── TRADING ─────────────────────────────────────────────────
 LEVERAGE           = 10
 SHADOW_MODE        = True
 POSITION_SIZE_USDT = 100.0
-MAX_SIMULTANEOUS   = 2   # максимум 2 одновременных (SUI+XRP)
+MAX_SIMULTANEOUS   = 3
 MAX_HOLD_CANDLES   = 5
-COOLDOWN_CANDLES   = 3   # пауза между сделками по символу
+COOLDOWN_CANDLES   = 3
 
 # ─── STALE ───────────────────────────────────────────────────
 STALE_CANDLES  = 2
